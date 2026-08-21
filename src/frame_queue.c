@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 
 #include "frame_queue.h"
 
@@ -10,6 +11,7 @@ struct FrameQueue {
     size_t head;
     size_t tail;
     size_t count;
+    pthread_mutex_t mutex;
 };
 
 
@@ -39,6 +41,13 @@ FrameQueue *frame_queue_create(size_t capacity)
         return NULL;
     }
 
+    if (pthread_mutex_init(&queue->mutex, NULL) != 0) {
+        perror("pthread_mutex_init");
+        free(queue->frames);
+        free(queue);
+        return NULL;
+    }
+
     queue->capacity = capacity;
 
     return queue;
@@ -57,10 +66,13 @@ int frame_queue_push(
         return -1;
     }
 
+    pthread_mutex_lock(&queue->mutex);
+
     /*
      * Queue is full.
      */
     if (queue->count >= queue->capacity) {
+        pthread_mutex_unlock(&queue->mutex);
         return -1;
     }
 
@@ -82,6 +94,7 @@ int frame_queue_push(
 
         memset(destination, 0, sizeof(*destination));
 
+        pthread_mutex_unlock(&queue->mutex);
         return -1;
     }
 
@@ -105,6 +118,7 @@ int frame_queue_push(
 
     queue->count++;
 
+    pthread_mutex_unlock(&queue->mutex);
     return 0;
 }
 
@@ -117,7 +131,10 @@ int frame_queue_pop(
         return -1;
     }
 
+    pthread_mutex_lock(&queue->mutex);
+
     if (queue->count == 0) {
+        pthread_mutex_unlock(&queue->mutex);
         return 0;
     }
 
@@ -148,6 +165,7 @@ int frame_queue_pop(
 
     queue->count--;
 
+    pthread_mutex_unlock(&queue->mutex);
     return 1;
 }
 
@@ -159,7 +177,13 @@ size_t frame_queue_size(
         return 0;
     }
 
-    return queue->count;
+    FrameQueue *mutable_queue = (FrameQueue *) queue;
+
+    pthread_mutex_lock(&mutable_queue->mutex);
+    size_t count = mutable_queue->count;
+    pthread_mutex_unlock(&mutable_queue->mutex);
+
+    return count;
 }
 
 
@@ -169,6 +193,8 @@ void frame_queue_clear(
     if (queue == NULL) {
         return;
     }
+
+    pthread_mutex_lock(&queue->mutex);
 
     /*
      * Free every queued image buffer.
@@ -181,6 +207,8 @@ void frame_queue_clear(
     queue->head = 0;
     queue->tail = 0;
     queue->count = 0;
+
+    pthread_mutex_unlock(&queue->mutex);
 }
 
 

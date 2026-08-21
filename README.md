@@ -144,7 +144,7 @@ make
 
 That is it. The server binds to `0.0.0.0:8080` by default.
 
-Open `http://localhost:8080/` in your browser and click `Connect WebSocket`.
+Open `http://localhost:8080/` in your browser. The page auto-connects the WebSocket.
 
 To use a different camera or port:
 ```sh
@@ -429,6 +429,10 @@ On start it will:
 1. Open and configure `/dev/video0` (YUYV, 640x480, 30 FPS, 4 MMAP buffers).
 2. Start the capture worker thread.
 3. Start listening for HTTP connections.
+4. Print the LAN URLs a receiver on another machine must open.
+
+`0.0.0.0` is a bind address, not a URL. A receiver (phone, second laptop, Ubuntu box)
+must use the camera PC's real IPv4 address, for example `http://192.168.1.10:8080/`.
 
 To stop the server, press `Ctrl+C` in the terminal.
 
@@ -548,10 +552,9 @@ ss -ltnp | grep 8080
   `http://SERVER_IP:8080/`
 - If you bound to a specific IP, use that exact IP in the address bar.
 
-On the page, click the `Connect WebSocket` button to start the live video. The
-button turns into a `Disconnect WebSocket` button while streaming. The status box
-shows the WebSocket state, the total frame count, the current sequence number,
-and the measured FPS.
+The page auto-connects the WebSocket. The button turns into `Disconnect WebSocket`
+while streaming. The status box shows the WebSocket state, the URL, the total
+frame count, the current sequence number, and the measured FPS.
 
 ---
 
@@ -573,8 +576,13 @@ Buffer 3 mapped: 614400 bytes
 Camera capture worker started
 Starting HTTP server on http://0.0.0.0:8080
 HTTP server started successfully
-HTTP endpoint: http://0.0.0.0:8080/
-WebSocket endpoint: ws://0.0.0.0:8080/ws
+Listen address: 0.0.0.0:8080  (0.0.0.0 means all interfaces)
+
+Receiver: do not use 0.0.0.0 as the URL.
+Open one of these on the viewing PC/phone:
+  http://127.0.0.1:8080/   (same machine only)
+  http://192.168.1.10:8080/
+  ws://192.168.1.10:8080/ws
 ```
 
 When a browser connects you will also see log lines like
@@ -600,7 +608,9 @@ disconnects you will see `Client connection closed`.
   "format": "YUYV",
   "width": 640,
   "height": 480,
-  "fps": 30
+  "fps": 30,
+  "bind": "0.0.0.0:8080",
+  "ws": "/ws"
 }
 ```
 
@@ -784,8 +794,8 @@ data pointer. `frame_average_luminance()` averages the Y samples of a YUYV frame
 A fixed size circular buffer, capacity 3. Every pushed frame is deep copied, so
 the queue owns its pixels independently of the driver buffers. `pop()` transfers
 ownership of the pixel buffer to the caller, who must free it. When the queue is
-full, the push is rejected and the worker drops that frame. The queue has no
-internal lock, because it is used in a single producer, single consumer pattern.
+full, the push is rejected and the worker drops that frame. A mutex protects push/pop
+between the capture thread and the HTTP thread.
 
 ### CameraWorker (`camera_worker.c`)
 
@@ -830,8 +840,8 @@ Memory ownership moves along the pipeline in clear steps:
 - `frame_queue_pop()` hands the copy to the caller, who must free it after the
   frame is sent.
 
-Because the queue is single producer and single consumer, it needs no lock. If
-you ever add more producers or consumers, you must add a mutex.
+The queue is single producer and single consumer, and it is also mutex-protected
+so the two threads never race on head/tail/count.
 
 ---
 
@@ -963,8 +973,9 @@ You should get the JSON status object back.
 | `Camera did not accept YUYV format` | The camera has no YUYV mode. Check with `v4l2-ctl -d /dev/video0 --list-formats-ext`. |
 | `Camera capture timeout` | The camera is busy in another program, or the resolution or FPS is not supported. |
 | `Failed to start HTTP server` | The bind address is not on this machine. Use `-a 0.0.0.0` to listen on all interfaces, or set `BIND_ADDRESS=0.0.0.0`. |
-| Browser shows `WebSocket: Error` | Wrong IP, or the port is blocked. Check the address and open the port in the firewall. |
-| Page loads but no video | You did not click `Connect WebSocket`, or another client is already attached. Only one client streams at a time. |
+| Browser shows `WebSocket: Error` | The receiver opened the wrong host. Do **not** use `0.0.0.0` or `127.0.0.1` from another PC. Use the camera machine LAN IP printed at startup (`http://192.168.x.x:8080/`). Also open TCP 8080 in the firewall. |
+| Page loads but no video | Wait for auto-connect, or click `Connect WebSocket`. Only one client streams at a time; a new client replaces the old one. |
+| Works on the camera laptop, receiver cannot connect | Server is reachable only on localhost, or the receiver copied `ws://0.0.0.0:8080/ws`. Bind `0.0.0.0`, allow the port, and open the printed LAN URL on the receiver. |
 | `Frame queue full; dropping frame` | Normal when no client is connected or the network is slow. Old frames are dropped on purpose. |
 | `Address already in use` | Another program uses port 8080. Use `-p 9090` to pick a different port, or set `LISTEN_PORT=9090`. |
 
