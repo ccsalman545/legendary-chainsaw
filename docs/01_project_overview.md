@@ -32,3 +32,11 @@ third_party/mongoose/  vendored networking library
 camera_capture.c camera_sender.c  standalone/experimental programs
 Makefile  README.md  docs/
 ```
+
+## Runtime behavior in detail
+At startup the executable parses options, resolves configuration, initializes the HTTP server, opens and configures the camera, creates a capacity-three queue, and starts the worker. The main thread then services Mongoose events. A browser GET receives the embedded page; a WebSocket upgrade attaches the client. Frames are only sent when a client exists.
+
+The project deliberately separates capture, buffering, transport, and presentation. This makes each boundary testable: V4L2 can be diagnosed with `v4l2-ctl`, HTTP with `curl`, and WebSocket behavior with browser developer tools. The browser does the color conversion so the server remains small and avoids a graphics or codec library.
+
+## Security and operational scope
+This is a trusted-LAN demonstration, not an authenticated camera gateway. It has no TLS, login, access control, rate limiting, or persistent configuration. Bind to localhost or protect the port with a firewall/VPN when confidentiality matters.

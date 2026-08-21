@@ -31,3 +31,17 @@ Headers live in `include/`; opaque types hide implementation state. Return conve
 start -> server_start -> camera/queue/worker setup -> worker_start -> run/poll
 stop signal -> worker_stop -> worker_join -> destroy -> camera_close
 ```
+
+## API usage example
+```c
+Camera *cam = camera_open("/dev/video0", 640, 480, 30);
+FrameQueue *q = frame_queue_create(3);
+CameraWorker *w = camera_worker_create(cam, q);
+if (!cam || !q || !w || camera_start(cam) < 0 || camera_worker_start(w) < 0) {
+    /* destroy only objects successfully created */
+}
+/* server loop consumes q; on shutdown: */
+camera_worker_stop(w); camera_worker_join(w); camera_worker_destroy(w);
+frame_queue_destroy(q); camera_close(cam);
+```
+Do not free a `Frame.data` pointer returned directly by `camera_capture`; return it with `camera_release_frame`. Do free `data` returned from `frame_queue_pop`. Do not call `frame_stream_send` after its Mongoose connection has been destroyed.

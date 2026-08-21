@@ -35,3 +35,9 @@ ws.onmessage = e => { const b=new Uint8Array(e.data), d=new DataView(e.data);
 };
 ```
 Limitations are one client, raw bandwidth, native-endian header, no compression/authentication/negotiation. Future extensions: explicit endian marker, 64-bit sequence, timestamps, format negotiation, compression, authentication, multi-client routing.
+
+## Parsing safely
+Never trust a received length. First require at least 28 bytes, read the seven fields, verify magic, require `frame_size <= message.length - 28`, and reject dimensions/stride that would overflow an allocation or canvas calculation. Treat a partial or malformed message as a dropped frame, not as a reason to index past the buffer. The current C sender uses `memcpy` of its native struct; a portable implementation should explicitly encode each word little-endian rather than relying on struct layout.
+
+## Worked payload
+For two pixels `(Y0,U,Y1,V)`, both pixels share U and V: pixel zero uses Y0 and pixel one uses Y1. Row padding, if `stride > width*2`, must be skipped at the end of every row. `sequence` is useful for detecting drops; it is not a timestamp and wraps at 2^32. WebSocket itself supplies message framing, masking rules, and TCP ordering; this protocol supplies only video semantics.

@@ -42,3 +42,14 @@ make clean && make info && make V=1
 | local-only | `-a 127.0.0.1` |
 | LAN access | `-a 0.0.0.0`, open firewall |
 | fresh rebuild | `make clean && make` |
+
+## Reading logs and isolating layers
+Start with `./build/http_server -h` to prove the executable runs. Then test `curl -i http://127.0.0.1:8080/status` (HTTP), open `/` in a local browser (HTML), and only then test a remote browser (routing/firewall). If `/status` works but no frames arrive, focus on V4L2 permissions, format negotiation, and the browser console. If the camera works with `v4l2-ctl` but the program fails, compare the requested YUYV mode and check the exact stderr line.
+
+A clean test sequence is:
+```sh
+make clean && make
+./build/http_server -a 127.0.0.1 -p 18080
+curl http://127.0.0.1:18080/status
+# Ctrl-C, then test the LAN address and firewall
+```

@@ -26,3 +26,17 @@ A circular array has head/tail/count. Push copies the frame; full queues reject/
 Header is seven native `uint32_t` values (28 bytes): magic, width, height, pixel format, stride, size, sequence. Payload is raw YUYV. For each pair: `C=Y-16`, `D=U-128`, `E=V-128`; `R=clamp((298C+409E+128)>>8)`, `G=clamp((298C-100D-208E+128)>>8)`, `B=clamp((298C+516D+128)>>8)`. Invalid camera/network states fail fast, log, and unwind; stale frames are preferable to memory growth.
 
 Design choices: V4L2 is native and low overhead; bounded queues provide predictable latency; WebSocket supports browser binary messages; raw YUYV avoids a codec dependency and keeps the protocol transparent, at the cost of bandwidth.
+
+## Camera state machine
+```text
+closed --open/configure/MMAP--> opened --STREAMON--> streaming
+streaming --DQBUF--> borrowed frame --QBUF--> streaming
+streaming --STREAMOFF/unmap/close--> closed
+```
+`camera_capture` waits with `select` up to two seconds, retries interrupted ioctls, dequeues a buffer, and records metadata including a wall-clock microsecond timestamp and driver buffer index. The worker must release every successful capture even if queue insertion fails.
+
+## Failure boundaries
+Allocation, ioctl, mmap, capability, format, and socket failures return an error and print a diagnostic. Cleanup is deliberately reverse-order: stop worker, join it, clear/destroy queue, stop/close camera, then tear down Mongoose. A failed queue push does not invalidate the borrowed camera frame; it only loses that frame.
+
+## Cost model
+At 640×480 YUYV, each copied frame is 614,400 bytes. A three-frame queue is roughly 1.8 MiB of payload plus allocator and metadata overhead, while the temporary stream packet adds one frame during transmission. Raw video is approximately 36.9 MB/s at 30 FPS, so LAN capacity and browser conversion—not CPU capture—usually dominate.

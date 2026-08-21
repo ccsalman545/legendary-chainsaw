@@ -59,3 +59,17 @@ Cross compile with a toolchain prefix, for example `make CC=aarch64-linux-gnu-gc
 | V4L2 header missing | install kernel/libc development headers |
 | permission denied writing build | use a writable checkout, not `sudo make` |
 | sanitizer link errors | put sanitizer flags in both CFLAGS and LDFLAGS |
+
+## What `make` actually does
+The pattern rule creates the corresponding directory under `build/`, compiles each translation unit with `-Iinclude -Ithird_party/mongoose -std=c11 -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -Wall -Wextra -Wpedantic`, then links all objects with `-pthread`. `CFLAGS ?=` means an existing environment/command-line value is preserved, but `FINAL_CFLAGS` still appends project flags. `LDFLAGS` is appended after the required pthread flag.
+
+For a verbose rebuild:
+```sh
+make clean
+make --debug=b
+make -n
+```
+The executable is a dynamically linked Linux ELF. Use `ldd build/http_server` to inspect runtime libraries and `readelf -h build/http_server` to inspect the target ABI. `strip` is optional for deployment; retain symbols in debug builds.
+
+## Cross compilation checklist
+A cross compiler alone is not enough: the sysroot must contain libc headers, Linux V4L2 headers, pthread support, and a linker. Build on the host, copy the binary and any required dynamic libraries (or use a matching target rootfs), then run `file` on the target. Camera device nodes and kernel support are target runtime concerns, not host build concerns.
