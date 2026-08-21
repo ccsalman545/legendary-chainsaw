@@ -32,7 +32,7 @@ On each distro install compiler, make, git, and v4l-utils using the commands in 
 
 RPi cross build: `make CC=aarch64-linux-gnu-gcc`, ensure target kernel headers and a V4L2 camera, copy `build/http_server`, then run it on the Pi. Clang: `make clean && CC=clang make`.
 
-Known limits: Linux only, V4L2-only capture, raw bandwidth, one client, native-endian protocol, and device drivers may not support requested YUYV dimensions.
+Known limits: Linux only, V4L2-only capture, raw bandwidth, native-endian protocol, and device drivers may not support requested YUYV dimensions.
 
 ## ABI and packaging notes
 Use the same architecture and libc family for all dynamically linked dependencies. `sizeof(size_t)` affects internal frame bookkeeping but not the 28-byte wire header, whose fields are fixed-width integers. `uint64_t` metadata remains internal to the C `Frame`; the wire sequence is intentionally truncated to 32 bits. Big-endian support requires changing both sender serialization and browser parsing. Alpine containers need `/dev/video*` passed through and the container user granted the device permissions.
