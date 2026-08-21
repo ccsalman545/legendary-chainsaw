@@ -2,7 +2,7 @@
 
 A small, self contained C program that reads live video from a Linux camera and
 shows it inside your web browser in real time. Builds and runs across all major
-Linux distributions — Debian, Ubuntu, Fedora, Arch, openSUSE, Alpine, and more —
+Linux distributions Debian, Ubuntu, Fedora, Arch, openSUSE, Alpine, and more
 on x86-64 and ARM.
 
 It grabs frames from a V4L2 camera (a normal USB webcam at `/dev/video0`), then
