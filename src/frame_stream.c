@@ -8,6 +8,13 @@
 
 #define FRAME_PACKET_MAGIC 0x4652414D
 
+/*
+ * Drop frames rather than grow the Mongoose send buffer without
+ * bound. A remote receiver on Wi-Fi cannot drain ~18 MB/s of raw
+ * YUYV; overflowing the send buffer closes the WebSocket.
+ */
+#define FRAME_STREAM_MAX_BUFFERED (2u * 1024u * 1024u)
+
 struct FrameStream {
     struct mg_connection *client;
 };
@@ -44,6 +51,11 @@ void frame_stream_set_client(
         return;
     }
 
+    if (stream->client != NULL && stream->client != connection) {
+        printf("Replacing previous WebSocket client\n");
+        stream->client->is_draining = 1;
+    }
+
     stream->client = connection;
 
     printf("Frame stream client attached\n");
@@ -78,7 +90,20 @@ int frame_stream_send(
         return -1;
     }
 
+    if (stream->client->is_closing ||
+        stream->client->is_draining ||
+        !stream->client->is_websocket) {
+        return -1;
+    }
+
     if (frame->data == NULL || frame->size == 0) {
+        return -1;
+    }
+
+    size_t packet_size = sizeof(FramePacketHeader) + frame->size;
+
+    if (stream->client->send.len + packet_size + 16 >
+            FRAME_STREAM_MAX_BUFFERED) {
         return -1;
     }
 
@@ -99,9 +124,6 @@ int frame_stream_send(
      *
      * [FramePacketHeader][Frame data]
      */
-
-    size_t packet_size = sizeof(header) + frame->size;
-
     unsigned char *packet = malloc(packet_size);
 
     if (packet == NULL) {
@@ -117,7 +139,7 @@ int frame_stream_send(
         frame->size
     );
 
-    mg_ws_send(
+    size_t sent = mg_ws_send(
         stream->client,
         packet,
         packet_size,
@@ -125,6 +147,11 @@ int frame_stream_send(
     );
 
     free(packet);
+
+    if (sent == 0) {
+        fprintf(stderr, "WebSocket frame send failed\n");
+        return -1;
+    }
 
     return 0;
 }

@@ -21,8 +21,8 @@
 ## Network (four cases)
 1. Address in use: `ss -ltnp | grep 8080`, stop old server or `-p 9090`.
 2. Remote connection refused: bind to LAN/`0.0.0.0` and allow TCP port in firewall.
-3. Wrong IP: `ip -br address`; use the server's reachable interface address.
-4. WebSocket fails: use `http(s)` page's matching `ws(s)` URL and check `/ws`.
+3. Wrong IP: `ip -br address`; use the server's reachable interface address. Never point the receiver at `0.0.0.0` (that is the local machine).
+4. WebSocket fails: open the HTML from the camera LAN IP so `location.host` is that IP, then `/ws` matches. Check firewall, `curl http://CAMERA_LAN_IP:8080/status`, and the server log line `WebSocket client connected`.
 
 ## Browser and performance
 For a blank page, use a current browser and inspect DevTools console; for disconnected WS verify `/status` and firewall. If frames are rejected, reload and confirm camera format. High CPU/bandwidth is expected for raw YUYV: lower camera resolution/FPS or use a faster LAN. Lag means a slow client; the bounded queue intentionally drops stale frames.

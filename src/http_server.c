@@ -10,6 +10,17 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+
+#define HTTP_CORS_HEADERS \
+    "Access-Control-Allow-Origin: *\r\n" \
+    "Access-Control-Allow-Methods: GET, OPTIONS\r\n" \
+    "Access-Control-Allow-Headers: *\r\n"
 
 /*
  * Default camera device.
@@ -33,6 +44,8 @@ struct HttpServer {
     FrameStream *frame_stream;
 
     char camera_device[256];
+    char listen_address[64];
+    uint16_t port;
 
     bool running;
 };
@@ -85,6 +98,7 @@ static const char HTML_PAGE[] =
     "}"
     "#connect{background:#1683ff;color:white;}"
     "#connect.disconnect{background:#d33;}"
+    ".hint{color:#aaa;font-size:13px;margin-top:8px;}"
     "</style>"
     "</head>"
 
@@ -96,8 +110,13 @@ static const char HTML_PAGE[] =
     "<div class=\"status\">"
     "<div>HTTP: <b>Online</b></div>"
     "<div id=\"wsstatus\">WebSocket: Disconnected</div>"
+    "<div id=\"wsurl\"></div>"
     "<div id=\"frames\">Frames: 0</div>"
     "<div id=\"fps\">FPS: 0</div>"
+    "<div class=\"hint\">"
+    "From another machine, open this page using the camera PC's "
+    "LAN IP (not 0.0.0.0 or 127.0.0.1)."
+    "</div>"
     "</div>"
 
     "<canvas id=\"video\" width=\"640\" height=\"480\"></canvas>"
@@ -116,9 +135,17 @@ static const char HTML_PAGE[] =
     "const fpsLabel=document.getElementById('fps');"
 
     "let ws=null;"
+    "let wantOpen=false;"
+    "let reconnectTimer=null;"
     "let frameCount=0;"
     "let fpsFrames=0;"
     "let fpsTime=performance.now();"
+
+    "function websocketUrl(){"
+        "const protocol="
+            "(location.protocol==='https:'?'wss://':'ws://');"
+        "return protocol+location.host+'/ws';"
+    "}"
 
     /*
      * Convert YUYV 4:2:2 to RGB.
@@ -248,23 +275,49 @@ static const char HTML_PAGE[] =
     /*
      * WebSocket connection.
      */
+    "function scheduleReconnect(){"
+        "if(!wantOpen){return;}"
+        "if(reconnectTimer){return;}"
+        "reconnectTimer=setTimeout(function(){"
+            "reconnectTimer=null;"
+            "connectWebSocket();"
+        "},1000);"
+    "}"
+
     "function connectWebSocket(){"
 
         "if(ws&&ws.readyState===WebSocket.OPEN){"
+            "wantOpen=false;"
+            "if(reconnectTimer){"
+                "clearTimeout(reconnectTimer);"
+                "reconnectTimer=null;"
+            "}"
             "ws.close();"
             "return;"
         "}"
 
-        "const protocol="
-            "(location.protocol==='https:'?'wss://':'ws://');"
+        "if(ws&&ws.readyState===WebSocket.CONNECTING){"
+            "return;"
+        "}"
 
-        "const url=protocol+location.host+'/ws';"
+        "wantOpen=true;"
+
+        "const url=websocketUrl();"
 
         "console.log('Connecting to '+url);"
 
-        "status.textContent='WebSocket: Connecting...';"
+        "document.getElementById('wsurl').textContent='URL: '+url;"
 
-        "ws=new WebSocket(url);"
+        "status.textContent='WebSocket: Connecting to '+url;"
+
+        "try{"
+            "ws=new WebSocket(url);"
+        "}catch(error){"
+            "console.error(error);"
+            "status.textContent='WebSocket: Error '+error;"
+            "scheduleReconnect();"
+            "return;"
+        "}"
 
         "ws.binaryType='arraybuffer';"
 
@@ -292,7 +345,9 @@ static const char HTML_PAGE[] =
 
             "console.error('WebSocket error',error);"
 
-            "status.textContent='WebSocket: Error';"
+            "status.textContent="
+                "'WebSocket: Error connecting to '+url+'. '"
+                "+'Use the camera LAN IP, bind 0.0.0.0, open firewall.';"
         "};"
 
         "ws.onclose=function(){"
@@ -306,14 +361,167 @@ static const char HTML_PAGE[] =
             "button.classList.remove('disconnect');"
 
             "ws=null;"
+
+            "scheduleReconnect();"
         "};"
     "}"
 
     "button.onclick=connectWebSocket;"
 
+    "window.addEventListener('load',function(){"
+        "document.getElementById('wsurl').textContent="
+            "'URL: '+websocketUrl();"
+        "connectWebSocket();"
+    "});"
+
+
     "</script>"
     "</body>"
     "</html>";
+
+
+
+static void print_peer(const char *prefix, struct mg_connection *c)
+{
+    char addr[80];
+
+    mg_snprintf(
+        addr,
+        sizeof(addr),
+        "%M",
+        mg_print_ip_port,
+        &c->rem
+    );
+
+    printf("%s%s\n", prefix, addr);
+}
+
+
+static void configure_client_socket(struct mg_connection *c)
+{
+    int fd = (int) (size_t) c->fd;
+    int on = 1;
+    int sndbuf = 2 * 1024 * 1024;
+
+    if (fd < 0) {
+        return;
+    }
+
+    (void) setsockopt(
+        fd,
+        SOL_SOCKET,
+        SO_KEEPALIVE,
+        &on,
+        sizeof(on)
+    );
+
+    (void) setsockopt(
+        fd,
+        IPPROTO_TCP,
+        TCP_NODELAY,
+        &on,
+        sizeof(on)
+    );
+
+    (void) setsockopt(
+        fd,
+        SOL_SOCKET,
+        SO_SNDBUF,
+        &sndbuf,
+        sizeof(sndbuf)
+    );
+}
+
+
+static void print_receiver_urls(uint16_t port)
+{
+    struct ifaddrs *ifaddr = NULL;
+
+    printf(
+        "\nReceiver: do not use 0.0.0.0 as the URL.\n"
+        "Open one of these on the viewing PC/phone:\n"
+        "  http://127.0.0.1:%u/   (same machine only)\n",
+        (unsigned) port
+    );
+
+    if (getifaddrs(&ifaddr) != 0) {
+        printf(
+            "  (could not list LAN addresses; run: ip -br address)\n\n"
+        );
+        return;
+    }
+
+    for (struct ifaddrs *ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        char ip[INET_ADDRSTRLEN];
+        struct sockaddr_in *sa;
+
+        if (ifa->ifa_addr == NULL) {
+            continue;
+        }
+
+        if (ifa->ifa_addr->sa_family != AF_INET) {
+            continue;
+        }
+
+        if ((ifa->ifa_flags & IFF_UP) == 0) {
+            continue;
+        }
+
+        if (ifa->ifa_flags & IFF_LOOPBACK) {
+            continue;
+        }
+
+        sa = (struct sockaddr_in *) ifa->ifa_addr;
+
+        if (inet_ntop(
+                AF_INET,
+                &sa->sin_addr,
+                ip,
+                sizeof(ip)
+            ) == NULL) {
+            continue;
+        }
+
+        printf(
+            "  http://%s:%u/\n"
+            "  ws://%s:%u/ws\n",
+            ip,
+            (unsigned) port,
+            ip,
+            (unsigned) port
+        );
+    }
+
+    freeifaddrs(ifaddr);
+    printf("\n");
+}
+
+
+static void format_listen_url(
+    char *url,
+    size_t url_size,
+    const char *listen_address,
+    uint16_t port
+)
+{
+    if (strchr(listen_address, ':') != NULL) {
+        snprintf(
+            url,
+            url_size,
+            "http://[%s]:%u",
+            listen_address,
+            (unsigned) port
+        );
+    } else {
+        snprintf(
+            url,
+            url_size,
+            "http://%s:%u",
+            listen_address,
+            (unsigned) port
+        );
+    }
+}
 
 
 /*
@@ -392,28 +600,45 @@ static void http_event_handler(
 
     switch (ev) {
 
+    case MG_EV_ACCEPT:
+        print_peer("Client accepted: ", c);
+        configure_client_socket(c);
+        break;
+
+    case MG_EV_ERROR:
+        fprintf(
+            stderr,
+            "Connection error: %s\n",
+            ev_data ? (const char *) ev_data : "?"
+        );
+        break;
+
     case MG_EV_HTTP_MSG: {
 
         struct mg_http_message *hm =
             (struct mg_http_message *) ev_data;
 
+        if (mg_strcasecmp(hm->method, mg_str("OPTIONS")) == 0) {
+            mg_http_reply(
+                c,
+                204,
+                HTTP_CORS_HEADERS,
+                ""
+            );
+            return;
+        }
+
         /*
          * WebSocket endpoint.
          */
-        if (mg_match(
-                hm->uri,
-                mg_str("/ws"),
-                NULL
-            )) {
+        if (mg_match(hm->uri, mg_str("/ws#"), NULL)) {
 
-            printf(
-                "WebSocket upgrade requested\n"
-            );
+            print_peer("WebSocket upgrade requested from ", c);
 
             mg_ws_upgrade(
                 c,
                 hm,
-                NULL
+                HTTP_CORS_HEADERS
             );
 
             return;
@@ -431,7 +656,8 @@ static void http_event_handler(
             mg_http_reply(
                 c,
                 200,
-                "Content-Type: text/html; charset=utf-8\r\n",
+                "Content-Type: text/html; charset=utf-8\r\n"
+                HTTP_CORS_HEADERS,
                 "%s",
                 HTML_PAGE
             );
@@ -451,19 +677,24 @@ static void http_event_handler(
             mg_http_reply(
                 c,
                 200,
-                "Content-Type: application/json\r\n",
+                "Content-Type: application/json\r\n"
+                HTTP_CORS_HEADERS,
                 "{"
                 "\"status\":\"online\","
                 "\"camera\":\"%s\","
                 "\"format\":\"YUYV\","
                 "\"width\":%u,"
                 "\"height\":%u,"
-                "\"fps\":%u"
+                "\"fps\":%u,"
+                "\"bind\":\"%s:%u\","
+                "\"ws\":\"/ws\""
                 "}",
                 server->camera_device,
                 (unsigned)CAMERA_WIDTH,
                 (unsigned)CAMERA_HEIGHT,
-                (unsigned)CAMERA_FPS
+                (unsigned)CAMERA_FPS,
+                server->listen_address,
+                (unsigned) server->port
             );
 
             return;
@@ -475,7 +706,8 @@ static void http_event_handler(
         mg_http_reply(
             c,
             404,
-            "Content-Type: text/plain\r\n",
+            "Content-Type: text/plain\r\n"
+            HTTP_CORS_HEADERS,
             "404 Not Found\n"
         );
 
@@ -488,9 +720,7 @@ static void http_event_handler(
      */
     case MG_EV_WS_OPEN:
 
-        printf(
-            "WebSocket client connected\n"
-        );
+        print_peer("WebSocket client connected: ", c);
 
         frame_stream_set_client(
             server->frame_stream,
@@ -817,17 +1047,24 @@ HttpServer *http_server_start(
     }
 
 
+    snprintf(
+        server->listen_address,
+        sizeof(server->listen_address),
+        "%s",
+        listen_address
+    );
+    server->port = port;
+
     /*
      * Build Mongoose URL.
      */
     char url[128];
 
-    snprintf(
+    format_listen_url(
         url,
         sizeof(url),
-        "http://%s:%u",
         listen_address,
-        (unsigned int) port
+        port
     );
 
 
@@ -889,16 +1126,12 @@ HttpServer *http_server_start(
     );
 
     printf(
-        "HTTP endpoint: http://%s:%u/\n",
+        "Listen address: %s:%u  (0.0.0.0 means all interfaces)\n",
         listen_address,
         (unsigned int) port
     );
 
-    printf(
-        "WebSocket endpoint: ws://%s:%u/ws\n",
-        listen_address,
-        (unsigned int) port
-    );
+    print_receiver_urls(port);
 
     printf(
         "Camera: %s\n",
@@ -948,6 +1181,40 @@ void http_server_run(
             server
         );
     }
+}
+
+
+void http_server_poll(
+    HttpServer *server,
+    int timeout_ms
+)
+{
+    if (server == NULL) {
+        return;
+    }
+
+    mg_mgr_poll(
+        &server->mgr,
+        timeout_ms
+    );
+
+    http_send_frames(server);
+}
+
+
+int http_server_send_frame(
+    HttpServer *server,
+    const Frame *frame
+)
+{
+    if (server == NULL || frame == NULL) {
+        return -1;
+    }
+
+    return frame_stream_send(
+        server->frame_stream,
+        frame
+    );
 }
 
 
