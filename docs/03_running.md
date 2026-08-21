@@ -37,7 +37,7 @@ SupplementaryGroups=video
 WantedBy=multi-user.target
 ```
 
-Console prints bind address, port, camera, LAN receiver URLs, client attach/detach, and errors. `0.0.0.0` means “listen on every interface”; the viewing PC must open a real LAN address printed at startup, not `0.0.0.0`. Ctrl+C/SIGTERM stops the loop and releases resources. The page connects to `ws://host:port/ws` using the page origin; `GET /` serves HTML, `GET /status` returns JSON such as `{"status":"online",...}`, and `/ws` carries binary frames. Only one active WebSocket client is retained; a new client replaces the previous one. Multiple cameras require separate processes/ports/devices. Slow receivers drop frames instead of growing the send buffer until the socket dies.
+Console prints bind address, port, camera, LAN receiver URLs, client attach/detach, and errors. `0.0.0.0` means “listen on every interface”; the viewing PC must open a real LAN address printed at startup, not `0.0.0.0`. Ctrl+C/SIGTERM stops the loop and releases resources. The page connects to `ws://host:port/ws` using the page origin; `GET /` serves HTML, `GET /status` returns JSON such as `{"status":"online",...}`, and `/ws` carries binary frames. Multiple WebSocket receivers are supported at once; each frame is broadcast to every connected viewer. Multiple cameras require separate processes/ports/devices. Slow receivers drop frames instead of growing the send buffer until the socket dies.
 
 ## Configuration examples
 ```sh

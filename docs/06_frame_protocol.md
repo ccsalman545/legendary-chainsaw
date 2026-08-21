@@ -34,7 +34,7 @@ ws.onmessage = e => { const b=new Uint8Array(e.data), d=new DataView(e.data);
   const size=d.getUint32(20,true); const yuyv=b.subarray(28,28+size); /* convert rows */
 };
 ```
-Limitations are one client, raw bandwidth, native-endian header, no compression/authentication/negotiation. Future extensions: explicit endian marker, 64-bit sequence, timestamps, format negotiation, compression, authentication, multi-client routing.
+Limitations are raw bandwidth, native-endian header, and no compression/authentication/negotiation. Future extensions: explicit endian marker, 64-bit sequence, timestamps, format negotiation, compression, and authentication. Multiple receivers are already supported (broadcast).
 
 ## Parsing safely
 Never trust a received length. First require at least 28 bytes, read the seven fields, verify magic, require `frame_size <= message.length - 28`, and reject dimensions/stride that would overflow an allocation or canvas calculation. Treat a partial or malformed message as a dropped frame, not as a reason to index past the buffer. The current C sender uses `memcpy` of its native struct; a portable implementation should explicitly encode each word little-endian rather than relying on struct layout.

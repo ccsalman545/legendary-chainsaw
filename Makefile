@@ -42,7 +42,7 @@ HTTP_OBJECTS = \
 	$(BUILD_DIR)/third_party/mongoose/mongoose.o
 
 
-.PHONY: all http clean info
+.PHONY: all http clean info test
 
 all: http
 
@@ -77,3 +77,13 @@ $(BUILD_DIR)/third_party/mongoose/mongoose.o: third_party/mongoose/mongoose.c
 
 clean:
 	rm -rf $(BUILD_DIR)
+
+
+# Multi-receiver integration test.
+#
+# Builds a throwaway server that uses a synthetic (V4L2-free) camera and
+# opens several WebSocket receivers at once to confirm that multiple
+# viewers can stream simultaneously and that a new viewer does not kick
+# an existing one off. Requires gcc and python3.
+test:
+	python3 test/test_multiple_receivers.py

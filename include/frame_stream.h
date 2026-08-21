@@ -13,10 +13,12 @@ typedef struct FrameStream FrameStream;
 FrameStream *frame_stream_create(void);
 
 /*
- * Attach the currently connected WebSocket client.
+ * Attach a WebSocket receiver.
  *
- * The connection is owned by Mongoose.
- * FrameStream stores only a non-owning pointer.
+ * Several receivers can watch the camera at once; every live
+ * connection is kept and each frame is broadcast to all of them.
+ * The connection is owned by Mongoose; FrameStream stores only a
+ * non-owning pointer.
  */
 void frame_stream_set_client(
     FrameStream *stream,
@@ -32,7 +34,8 @@ void frame_stream_clear_client(
 );
 
 /*
- * Send one Frame as one WebSocket binary message.
+ * Send one Frame as one WebSocket binary message to every attached
+ * receiver.
  *
  * Packet format:
  *
@@ -42,8 +45,8 @@ void frame_stream_clear_client(
  * +----------------------+------------------+
  *
  * Returns:
- *   0  success
- *  -1 failure / no client
+ *   0  delivered to at least one receiver
+ *  -1 failure / no receiver
  */
 int frame_stream_send(
     FrameStream *stream,

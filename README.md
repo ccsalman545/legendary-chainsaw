@@ -619,8 +619,9 @@ WebSocket behavior at `/ws`:
 - On open, the server sends one text message: `Camera WebSocket connected`.
 - Text messages from the client are echoed back as text.
 - Video frames arrive as binary messages, one message per frame.
-- Only one streaming client is served at a time. A new client replaces the old
-  one.
+- Multiple receivers can watch at once; each frame is broadcast to every
+  connected WebSocket client. A slow receiver drops frames instead of
+  blocking the others.
 
 Any other path returns `404 Not Found`.
 
@@ -974,7 +975,7 @@ You should get the JSON status object back.
 | `Camera capture timeout` | The camera is busy in another program, or the resolution or FPS is not supported. |
 | `Failed to start HTTP server` | The bind address is not on this machine. Use `-a 0.0.0.0` to listen on all interfaces, or set `BIND_ADDRESS=0.0.0.0`. |
 | Browser shows `WebSocket: Error` | The receiver opened the wrong host. Do **not** use `0.0.0.0` or `127.0.0.1` from another PC. Use the camera machine LAN IP printed at startup (`http://192.168.x.x:8080/`). Also open TCP 8080 in the firewall. |
-| Page loads but no video | Wait for auto-connect, or click `Connect WebSocket`. Only one client streams at a time; a new client replaces the old one. |
+| Page loads but no video | Wait for auto-connect, or click `Connect WebSocket`. Several receivers can watch at once; each one gets its own copy of the frames, so a slow receiver drops frames without affecting the others. |
 | Works on the camera laptop, receiver cannot connect | Server is reachable only on localhost, or the receiver copied `ws://0.0.0.0:8080/ws`. Bind `0.0.0.0`, allow the port, and open the printed LAN URL on the receiver. |
 | `Frame queue full; dropping frame` | Normal when no client is connected or the network is slow. Old frames are dropped on purpose. |
 | `Address already in use` | Another program uses port 8080. Use `-p 9090` to pick a different port, or set `LISTEN_PORT=9090`. |
@@ -997,8 +998,9 @@ No. The program talks to the camera directly with V4L2 and does its own framing.
 No. It is included in `third_party/mongoose` and is compiled with the project.
 
 **Can more than one browser watch at once?**
-Not in the current version. The server keeps one streaming client. A new client
-replaces the old one.
+Yes. The server broadcasts each frame to every connected WebSocket receiver,
+so a phone, a laptop, and another PC can all watch the camera at the same
+time. A slow receiver simply drops frames and never blocks the others.
 
 **Why is the video data so large?**
 It is raw YUYV, which is about 640 x 480 x 2 x 30, or roughly 18 megabytes per
@@ -1020,10 +1022,10 @@ Yes. The code compiles cleanly with musl libc. Install build tools with
 
 ## Limitations and ideas for later
 
-- Single WebSocket client. A second client replaces the first.
+- Broadcasts to all connected WebSocket receivers (multi-viewer).
 - No authentication and no TLS. It is meant for a trusted local network.
-- The frame queue has no lock, because it relies on one producer and one
-  consumer.
+- The frame queue is mutex-protected so the capture thread and the HTTP
+  thread never race on it.
 - The header is written in host byte order. Add explicit little endian
   serialization for big endian machines.
 - Bind address, port, and camera device are now configurable at runtime via
