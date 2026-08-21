@@ -22,6 +22,20 @@ problems you will hit on a fresh Linux machine.
 
 ---
 
+## Documentation
+
+| Guide | Contents |
+|---|---|
+| [Project overview](docs/01_project_overview.md) | Features, requirements, layout, and flow |
+| [Building](docs/02_building.md) | Dependencies, Makefile, builds, and cross-compilation |
+| [Running](docs/03_running.md) | CLI, environment, camera, network, and endpoints |
+| [HTTP/WebSocket test](docs/04_http_websocket_test.md) | Historical integration notes |
+| [Architecture](docs/05_architecture.md) | Threads, ownership, queue, and data flow |
+| [Frame protocol](docs/06_frame_protocol.md) | WebSocket wire format and parsing |
+| [API reference](docs/07_api_reference.md) | Public C interfaces and lifecycle |
+| [Cross-platform](docs/08_cross_platform.md) | Linux distro, libc, and architecture notes |
+| [Troubleshooting](docs/09_troubleshooting.md) | Build, camera, network, browser, and performance fixes |
+
 ## Table of Contents
 
 1. [What this project is](#what-this-project-is)
@@ -719,7 +733,15 @@ legendary-chainsaw/
     mongoose.c
     mongoose.h
   docs/
+    01_project_overview.md      Project overview
+    02_building.md              Build guide
+    03_running.md               Running and configuration
     04_http_websocket_test.md   Stage notes about the network setup
+    05_architecture.md          Architecture and threading
+    06_frame_protocol.md        WebSocket wire protocol
+    07_api_reference.md         C API reference
+    08_cross_platform.md        Cross-platform Linux notes
+    09_troubleshooting.md       Troubleshooting guide
   camera_capture.c         Old prototype: capture to a file (not built)
   camera_sender.c          Old prototype: raw TCP sender (not built)
 ```
