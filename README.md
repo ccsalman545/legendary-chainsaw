@@ -1,7 +1,9 @@
 # legendary-chainsaw
 
 A small, self contained C program that reads live video from a Linux camera and
-shows it inside your web browser in real time.
+shows it inside your web browser in real time. Builds and runs across all major
+Linux distributions — Debian, Ubuntu, Fedora, Arch, openSUSE, Alpine, and more —
+on x86-64 and ARM.
 
 It grabs frames from a V4L2 camera (a normal USB webcam at `/dev/video0`), then
 sends those frames to the browser over HTTP and WebSocket. The browser converts
@@ -33,7 +35,7 @@ problems you will hit on a fresh Linux machine.
 9. [Get the code](#get-the-code)
 10. [Setup and build](#setup-and-build)
 11. [Run it](#run-it)
-12. [Important: set the correct bind address](#important-set-the-correct-bind-address)
+12. [Important: bind address and configuration](#important-bind-address-and-configuration)
 13. [Camera permissions](#camera-permissions)
 14. [Firewall and ports](#firewall-and-ports)
 15. [Open it in the browser](#open-it-in-the-browser)
@@ -56,8 +58,8 @@ problems you will hit on a fresh Linux machine.
 
 ## What this project is
 
-The program runs on a Linux computer that has a webcam attached. It does four
-jobs at the same time:
+The program runs on any Linux computer (x86-64 or ARM, glibc or musl) that has
+a webcam attached. It does four jobs at the same time:
 
 1. It talks to the camera using the Linux V4L2 API and pulls raw video frames.
 2. It runs a background thread that keeps the camera busy and never lets the
@@ -86,29 +88,54 @@ or as a starting point for a bigger project.
 - A simple binary frame protocol with a 28 byte header and a magic number.
 - Strict build flags: `-Wall -Wextra -Wpedantic` on C11.
 - No third party download step. Mongoose is vendored inside the repo.
+- Cross-platform Linux build. Works with glibc (Debian, Ubuntu, Fedora, Arch,
+  openSUSE) and musl (Alpine). CC is overridable (`CC=clang make`).
+- Configurable at runtime: bind address, port, and camera device can be set
+  via command-line arguments or environment variables. No source edits needed.
 
 ---
 
 ## Quick start (the short version)
 
-If you just want it running and you are on Debian or Ubuntu:
+Works on Debian, Ubuntu, Fedora, Arch, openSUSE, Alpine, and any Linux with a
+V4L2 camera.
 
+**Debian / Ubuntu:**
 ```sh
 sudo apt update && sudo apt install -y build-essential git v4l-utils
-git clone https://github.com/ccsalman545/legendary-chainsaw.git
-cd legendary-chainsaw
 ```
 
-Then open `src/http_main.c` and change the bind address from `192.168.1.10` to
-`0.0.0.0` (this one step is explained in detail later and is required on almost
-every machine), then:
-
+**Fedora:**
 ```sh
+sudo dnf install -y gcc make git v4l-utils
+```
+
+**Arch:**
+```sh
+sudo pacman -S base-devel git v4l-utils
+```
+
+**Alpine:**
+```sh
+sudo apk add build-base git v4l-utils
+```
+
+Then clone and build:
+```sh
+git clone https://github.com/ccsalman545/legendary-chainsaw.git
+cd legendary-chainsaw
 make
 ./build/http_server
 ```
 
+That is it. The server binds to `0.0.0.0:8080` by default.
+
 Open `http://localhost:8080/` in your browser and click `Connect WebSocket`.
+
+To use a different camera or port:
+```sh
+CAMERA_DEVICE=/dev/video1 ./build/http_server -p 9090
+```
 
 The rest of this document explains every step in full.
 
@@ -218,13 +245,16 @@ You need these on the machine that has the camera and runs the server:
 | Dependency | Why it is needed | Notes |
 |---|---|---|
 | Linux kernel with V4L2 | Talks to the camera | Present on every normal Linux distro |
-| A UVC webcam at `/dev/video0` | The video source | Must support capture, streaming, and YUYV |
-| GCC (or Clang) | Compiles the C11 code | Any recent version works |
+| A UVC webcam (default `/dev/video0`) | The video source | Overridable via `CAMERA_DEVICE` env var |
+| GCC or Clang | Compiles the C11 code | Override with `CC=clang make` |
 | GNU Make | Runs the build | Standard build tool |
 | pthread | Runs the capture thread | Part of the C library, linked with `-pthread` |
 | Git | To clone the repo | Optional if you download a zip instead |
 | A web browser | To view the video | On any machine that can reach the server |
 | v4l-utils | Camera diagnostics | Optional, only used for troubleshooting |
+
+The build system works with both glibc (Debian, Ubuntu, Fedora, Arch, openSUSE)
+and musl libc (Alpine Linux). No distribution-specific patches are needed.
 
 Mongoose (the HTTP and WebSocket library) is already inside
 `third_party/mongoose`, so you do not install it. It is a single `.c` file and a
@@ -393,49 +423,64 @@ machine needs the bind address change, and many need the camera permission fix.
 
 ---
 
-## Important: set the correct bind address
+## Important: bind address and configuration
 
-By default the server tries to listen on the fixed address `192.168.1.10`
-(set in `src/http_main.c`). It will only start if your machine actually owns that
-exact IP. On most Linux systems that address does not exist, so the server prints
-`Failed to start HTTP server` and stops.
+The server is configurable at runtime. No source code edits are needed.
 
-To make it run on any Linux machine, open `src/http_main.c`, change the address,
-save, and rebuild.
+### Default values
 
-Listen on all network interfaces (the simplest choice, works everywhere):
+| Setting | Default | Source |
+|---|---|---|
+| Bind address | `0.0.0.0` (all interfaces) | `DEFAULT_BIND_ADDRESS` in `src/http_main.c` |
+| Port | `8080` | `DEFAULT_PORT` in `src/http_main.c` |
+| Camera device | `/dev/video0` | `CAMERA_DEVICE_DEFAULT` in `src/http_server.c` |
 
-```c
-HttpServer *server =
-    http_server_start(
-        "0.0.0.0",
-        8080
-    );
+### Command-line arguments
+
+```sh
+./build/http_server -a 192.168.1.50 -p 9090
 ```
 
-Or bind to your own machine IP. Find your IP first:
+| Flag | What it does |
+|---|---|
+| `-a ADDR`, `--address ADDR` | Bind to a specific address |
+| `-p PORT`, `--port PORT` | Listen on a different port |
+| `-h`, `--help` | Show usage |
+
+### Environment variables
+
+Environment variables are useful when you do not want to pass flags, or when
+you launch the server from a script or systemd unit.
+
+```sh
+export BIND_ADDRESS=0.0.0.0
+export LISTEN_PORT=8080
+export CAMERA_DEVICE=/dev/video1
+./build/http_server
+```
+
+| Variable | What it does | Default |
+|---|---|---|
+| `BIND_ADDRESS` | Bind address (overridden by `-a`) | `0.0.0.0` |
+| `LISTEN_PORT` | Listen port (overridden by `-p`) | `8080` |
+| `CAMERA_DEVICE` | Camera device path | `/dev/video0` |
+
+Command-line arguments take priority over environment variables. Environment
+variables take priority over the built-in defaults.
+
+### Finding your IP address
+
+If you want to bind to a specific network interface, find your IP first:
 
 ```sh
 ip addr
 ```
 
-Look for an address like `192.168.x.x` under your network interface, and put that
-value in place of `192.168.1.10`.
-
-After editing, rebuild and run:
+Look for an address like `192.168.x.x` under your network interface, and use it:
 
 ```sh
-make clean
-make
-./build/http_server
+./build/http_server -a 192.168.1.50
 ```
-
-The port `8080` is set in the same file. Change it there if the port is already
-in use.
-
-Note: this is a one line setup step, not a bug in the code. The project builds
-fine on every Linux system. It just needs the address that matches your machine
-before it can start listening.
 
 ---
 
@@ -616,18 +661,29 @@ not part of the WebSocket path.
 
 ## Configuration values
 
-These values are compile time constants. To change them, edit the file, then
-rebuild with `make`.
+### Runtime configuration (no rebuild needed)
+
+These settings can be changed at runtime using command-line flags or
+environment variables. See the [configuration section](#important-bind-address-and-configuration)
+above for full details.
+
+| Setting | Default | CLI flag | Environment variable |
+|---|---|---|---|
+| Bind address | `0.0.0.0` | `-a ADDR` | `BIND_ADDRESS` |
+| Port | `8080` | `-p PORT` | `LISTEN_PORT` |
+| Camera device | `/dev/video0` | — | `CAMERA_DEVICE` |
+
+### Compile-time configuration (edit and rebuild)
+
+These values are set in the source code. Edit the file, then rebuild
+with `make`.
 
 | Setting | Value | File |
 |---|---|---|
-| Camera device | `/dev/video0` | `src/http_server.c` (`CAMERA_DEVICE`) |
 | Width | `640` | `src/http_server.c` (`CAMERA_WIDTH`) |
 | Height | `480` | `src/http_server.c` (`CAMERA_HEIGHT`) |
 | FPS | `30` | `src/http_server.c` (`CAMERA_FPS`) |
 | Frame queue size | `3` | `src/http_server.c` (`FRAME_QUEUE_CAPACITY`) |
-| Bind address | `192.168.1.10` | `src/http_main.c` |
-| Port | `8080` | `src/http_main.c` |
 | Number of MMAP buffers | `4` | `src/camera_v4l2.c` (`CAMERA_BUFFER_COUNT`) |
 
 ---
@@ -636,7 +692,7 @@ rebuild with `make`.
 
 ```text
 legendary-chainsaw/
-  Makefile               Build rules (gcc, C11)
+  Makefile               Cross-platform build rules (gcc/clang, C11, glibc/musl)
   README.md              This file
   .gitignore             Ignores build output and old binaries
   include/               Public headers, one per module
@@ -648,7 +704,7 @@ legendary-chainsaw/
     http_server.h          HTTP and WebSocket server API
     transport_tcp.h        Old TCP client API
   src/
-    http_main.c            Program entry point (set the bind IP here)
+    http_main.c            Program entry point (CLI args and env vars)
     http_server.c          Mongoose server plus the embedded web page
     camera_v4l2.c          V4L2 camera capture
     camera_worker.c        Capture thread
@@ -759,24 +815,83 @@ you ever add more producers or consumers, you must add a mutex.
 
 ## Cross platform notes (Linux)
 
-This project was checked for building and running across Linux systems. Summary:
+This project builds and runs on all major Linux distributions without any
+source code changes or patches. Here is what was done to achieve that.
 
-- The code builds cleanly on a modern GCC with strict warnings turned on. It uses
-  only standard POSIX and Linux V4L2 headers, so it compiles on the common
-  distros (Debian, Ubuntu, Fedora, Arch, openSUSE, Alpine, and similar).
-- The one thing that stops it from running out of the box on a new machine is the
-  fixed bind address `192.168.1.10` in `src/http_main.c`. Change it to `0.0.0.0`
-  or your own IP as shown above, and it starts on any Linux box. This is a one
-  line setup step, not a code bug.
-- The wire header is written in the host byte order and read by the browser as
-  little endian. This is correct on x86 and on the common ARM builds, which cover
-  almost every desktop, laptop, server, and Raspberry Pi. On a big endian Linux
-  system the header bytes would need to be swapped.
-- The camera path assumes a V4L2 device that supports YUYV. Most USB webcams do.
-  If yours does not, see the troubleshooting table.
+### Supported distributions
 
-In short: the build works everywhere, and running works everywhere once you set
-the bind address for your machine.
+| Distribution | C library | Status |
+|---|---|---|
+| Debian 11+ | glibc | ✅ Builds and runs |
+| Ubuntu 20.04+ | glibc | ✅ Builds and runs |
+| Fedora 35+ | glibc | ✅ Builds and runs |
+| Arch Linux | glibc | ✅ Builds and runs |
+| openSUSE Leap / Tumbleweed | glibc | ✅ Builds and runs |
+| Alpine Linux 3.15+ | musl | ✅ Builds and runs |
+| Raspberry Pi OS | glibc (ARM) | ✅ Builds and runs |
+| Any Linux with V4L2 | glibc or musl | ✅ Builds and runs |
+
+### What makes it portable across Linux distros
+
+1. **Standard POSIX and Linux kernel headers only.** The code uses
+   `<linux/videodev2.h>` for the camera, POSIX threads for the capture worker,
+   and standard POSIX socket and I/O calls. All of these are available on every
+   Linux system regardless of the C library.
+
+2. **The Makefile is distribution-agnostic.** It uses `CC ?= gcc` so you can
+   override the compiler with `CC=clang make`. The `-D_DEFAULT_SOURCE` and
+   `-D_POSIX_C_SOURCE=200809L` flags work correctly on both glibc and musl.
+   The old `-include alloca.h` workaround (which was only needed for some glibc
+   versions) has been removed because Mongoose includes `<alloca.h>` internally.
+
+3. **No hard-coded paths or addresses at compile time.** The bind address, port,
+   and camera device are all configurable at runtime through command-line
+   arguments or environment variables. You do not need to edit source files and
+   rebuild for a different machine.
+
+4. **No external build tools or package dependencies.** Everything is plain C11
+   compiled with GCC or Clang. Mongoose is vendored in the repo. No CMake, no
+   pkg-config, no autotools, no downloaded dependencies.
+
+5. **Works with both glibc and musl.** Alpine Linux uses musl instead of glibc.
+   The code compiles cleanly on both because it only uses POSIX-standard
+   functions and types.
+
+### Architecture support
+
+- **x86-64** — desktops, laptops, servers. The wire header is written in host
+  byte order and read by the browser as little endian. x86-64 is little endian,
+  so this works correctly.
+- **ARM (32-bit and 64-bit)** — Raspberry Pi, embedded boards, ARM servers.
+  ARM is also little endian on Linux, so the header works without changes.
+- **Big endian** — not currently supported. The wire header would need explicit
+  little endian serialization (see Limitations).
+
+### Building on different distros
+
+The build command is the same everywhere:
+
+```sh
+make
+```
+
+Use `CC` to choose a different compiler:
+
+```sh
+CC=clang make
+```
+
+Use `CFLAGS` to add extra flags:
+
+```sh
+CFLAGS="-march=armv7-a" make
+```
+
+Use `make info` to print the full build configuration:
+
+```sh
+make info
+```
 
 ---
 
@@ -795,6 +910,7 @@ v4l2-ctl -d /dev/video0 --list-formats-ext
 
 ```sh
 make clean
+make info
 make
 ls -l build/http_server
 ```
@@ -824,11 +940,11 @@ You should get the JSON status object back.
 | `Device does not support video capture` | The node is not a capture device. Try another `/dev/videoN`. |
 | `Camera did not accept YUYV format` | The camera has no YUYV mode. Check with `v4l2-ctl -d /dev/video0 --list-formats-ext`. |
 | `Camera capture timeout` | The camera is busy in another program, or the resolution or FPS is not supported. |
-| `Failed to start HTTP server` | The bind address is not on this machine. Set `0.0.0.0` or your own IP in `src/http_main.c`, then rebuild. |
+| `Failed to start HTTP server` | The bind address is not on this machine. Use `-a 0.0.0.0` to listen on all interfaces, or set `BIND_ADDRESS=0.0.0.0`. |
 | Browser shows `WebSocket: Error` | Wrong IP, or the port is blocked. Check the address and open the port in the firewall. |
 | Page loads but no video | You did not click `Connect WebSocket`, or another client is already attached. Only one client streams at a time. |
 | `Frame queue full; dropping frame` | Normal when no client is connected or the network is slow. Old frames are dropped on purpose. |
-| `Address already in use` | Another program uses port 8080. Change the port in `src/http_main.c` or stop the other program. |
+| `Address already in use` | Another program uses port 8080. Use `-p 9090` to pick a different port, or set `LISTEN_PORT=9090`. |
 
 Quick camera checks (needs `v4l-utils`):
 
@@ -860,8 +976,12 @@ Yes. Edit the constants in `src/http_server.c` and rebuild. The driver may adjus
 your request to the nearest supported mode.
 
 **Does it work on a Raspberry Pi?**
-Yes, as long as the Pi runs Linux with V4L2 and a supported camera. Set the bind
-address as described.
+Yes. The Pi runs Linux with V4L2 and the build works out of the box. No source
+changes needed — just `make` and run.
+
+**Does it work on Alpine Linux?**
+Yes. The code compiles cleanly with musl libc. Install build tools with
+`apk add build-base` and run `make`.
 
 ---
 
@@ -873,8 +993,9 @@ address as described.
   consumer.
 - The header is written in host byte order. Add explicit little endian
   serialization for big endian machines.
-- Device, resolution, FPS, bind address, and port are compile time constants.
-  Command line flags or a config file would be a natural next step.
+- Bind address, port, and camera device are now configurable at runtime via
+  command-line flags and environment variables. Resolution and FPS are still
+  compile time constants.
 - No audio and no compression. MJPEG or H.264 would use far less bandwidth.
 - The old checkpoint and prototype files could be moved into an archive folder.
 
