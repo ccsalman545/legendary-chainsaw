@@ -1,199 +1,348 @@
-# legendary-chainsaw — V4L2 Camera → HTTP/WebSocket Streaming Server
+# legendary-chainsaw
 
-A portable, dependency-light **C11** application that captures live video from a
-Linux **V4L2** camera (a USB webcam on `/dev/video0`) and streams it to a web
-browser in real time over **HTTP + WebSocket**. The browser receives raw **YUYV
-4:2:2** frames, converts them to RGB in JavaScript, and draws them onto an HTML5
-`<canvas>`.
+A small, self contained C program that reads live video from a Linux camera and
+shows it inside your web browser in real time.
 
-The repository also contains the earlier TCP-sender prototypes that led up to
-the final WebSocket implementation, kept for reference.
+It grabs frames from a V4L2 camera (a normal USB webcam at `/dev/video0`), then
+sends those frames to the browser over HTTP and WebSocket. The browser converts
+the raw YUYV video into RGB with JavaScript and draws it on an HTML canvas. There
+is no external player, no plugin, and no app to install on the viewing device.
+Any modern browser can watch the stream.
+
+Everything is plain C11. The only networking library it uses (Mongoose) is
+already included inside the repository, so you never download it separately. The
+whole web page is also baked into the program as a single string, so there are no
+static files to serve or lose.
+
+This README is long on purpose. It explains not just how to run the project, but
+also how each part works, why it is built that way, and how to fix the common
+problems you will hit on a fresh Linux machine.
 
 ---
 
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [Features](#features)
-3. [Architecture](#architecture)
-4. [Repository Layout](#repository-layout)
-5. [Requirements](#requirements)
-6. [Building](#building)
-7. [Running](#running)
-8. [HTTP & WebSocket API](#http--websocket-api)
-9. [Frame Wire Protocol](#frame-wire-protocol)
-10. [Component Reference](#component-reference)
-11. [Legacy TCP Prototypes](#legacy-tcp-prototypes)
-12. [Network Setup](#network-setup)
-13. [Troubleshooting](#troubleshooting)
-14. [Limitations & Future Work](#limitations--future-work)
-15. [License](#license)
+1. [What this project is](#what-this-project-is)
+2. [What you get](#what-you-get)
+3. [Quick start (the short version)](#quick-start-the-short-version)
+4. [How it works (flowchart)](#how-it-works-flowchart)
+5. [System diagram (TikZ)](#system-diagram-tikz)
+6. [The data path, step by step](#the-data-path-step-by-step)
+7. [Dependencies](#dependencies)
+8. [Install the dependencies (step by step, any Linux)](#install-the-dependencies-step-by-step-any-linux)
+9. [Get the code](#get-the-code)
+10. [Setup and build](#setup-and-build)
+11. [Run it](#run-it)
+12. [Important: set the correct bind address](#important-set-the-correct-bind-address)
+13. [Camera permissions](#camera-permissions)
+14. [Firewall and ports](#firewall-and-ports)
+15. [Open it in the browser](#open-it-in-the-browser)
+16. [What the console prints](#what-the-console-prints)
+17. [HTTP and WebSocket endpoints](#http-and-websocket-endpoints)
+18. [Frame wire format](#frame-wire-format)
+19. [YUYV to RGB conversion](#yuyv-to-rgb-conversion)
+20. [Configuration values](#configuration-values)
+21. [Project layout](#project-layout)
+22. [Component reference](#component-reference)
+23. [Threading and memory ownership](#threading-and-memory-ownership)
+24. [Cross platform notes (Linux)](#cross-platform-notes-linux)
+25. [Verify your build and run](#verify-your-build-and-run)
+26. [Troubleshooting](#troubleshooting)
+27. [Frequently asked questions](#frequently-asked-questions)
+28. [Limitations and ideas for later](#limitations-and-ideas-for-later)
+29. [License](#license)
 
 ---
 
-## Overview
+## What this project is
 
-The program runs on a Linux PC with an attached UVC webcam and:
+The program runs on a Linux computer that has a webcam attached. It does four
+jobs at the same time:
 
-1. Opens the camera with the **V4L2** API, negotiating **YUYV 4:2:2**,
-   **640×480 @ 30 FPS**, using **memory-mapped (MMAP)** capture buffers.
-2. Runs a dedicated **capture worker thread** that continuously dequeues frames
-   from the driver and pushes copies of them into a bounded **frame queue**.
-3. Runs a **Mongoose**-based HTTP server that:
-   - serves a self-contained HTML page at `/`,
-   - exposes a JSON status endpoint at `/status`,
-   - upgrades connections at `/ws` to WebSockets,
-   - pushes captured frames to the connected WebSocket client as **binary**
-     messages.
-4. The browser page decodes each binary frame (a 28-byte header followed by the
-   raw YUYV payload), converts YUYV → RGB, and displays the live video on a
-   canvas with a frame counter and FPS readout.
+1. It talks to the camera using the Linux V4L2 API and pulls raw video frames.
+2. It runs a background thread that keeps the camera busy and never lets the
+   network side slow the camera down.
+3. It runs a small web server (built on the Mongoose library) that serves a web
+   page and accepts WebSocket connections.
+4. It pushes each captured frame to the connected browser, which draws it on a
+   canvas so you see live video.
 
-This design cleanly separates the hardware capture layer (V4L2), the
-concurrency layer (worker thread + queue), the transport layer (TCP or
-WebSocket), and the presentation layer (HTML/JS in the browser).
+It is meant as a clear, readable example of a full capture to browser pipeline in
+pure C, with clean module boundaries. It is good for learning, for a LAN camera,
+or as a starting point for a bigger project.
 
 ---
 
-## Features
+## What you get
 
-- **Native V4L2 capture** — no GStreamer, OpenCV, or ffmpeg dependencies.
-- **YUYV 4:2:2** streaming at 640×480 / 30 FPS (driver-negotiated).
-- **Zero-copy camera reads** — frames come straight from MMAP buffers; only the
-  queued copy is heap-allocated.
-- **Multithreaded pipeline** — capture happens on a separate pthread so the
-  network loop never blocks on the camera.
-- **Bounded frame queue** — drops the oldest-unconsumed frames gracefully when
-  a client cannot keep up (fixed capacity of 3).
-- **Embedded web UI** — a single static HTML string with no external assets.
-- **Clean modular C API** — opaque structs and header-only interfaces per module.
-- **Strict compiler flags** — `-Wall -Wextra -Wpedantic` on C11.
-- **Zero third-party build step** — Mongoose is vendored as a single `.c`/`.h`.
-
----
-
-## Architecture
-
-```text
-                        ┌─────────────────────────────────────────────┐
-                        │                Browser (client)             │
-                        │  YUYV → RGB → <canvas>  |  frame/FPS HUD    │
-                        └──────────────────▲──────────────────────────┘
-                                           │ WebSocket (binary frames)
-                                           │ HTTP (HTML page / status)
-┌──────────────────────────────────────────┴───────────────────────────┐
-│                        HttpServer  (Mongoose 7.23)                   │
-│   mg_mgr event loop ──► http_event_handler                           │
-│        │                                                             │
-│        │   /          /status     /ws (upgrade)                      │
-│        │   HTML page   JSON        │                                 │
-│        │                           ▼                                 │
-│        │                   FrameStream (28-byte header + YUYV)       │
-│        ▲                                                             │
-│        │ drains queue each poll (10 ms)                              │
-│        │                                                             │
-│   FrameQueue (capacity 3, circular, owns copies)                     │
-│        ▲                                                             │
-│        │ push (copy frame)                                           │
-│  ┌─────┴──────────────────────────────────────────────────────────┐  │
-│  │            CameraWorker (pthread)                              │  │
-│  │   camera_capture() ─► copy into queue ─► release V4L2 buffer   │  │
-│  └─────▲──────────────────────────────────────────────────────────┘  │
-│        │ VIDIOC_DQBUF / VIDIOC_QBUF                                  │
-│  ┌─────┴──────────────────────────────────────────────────────────┐  │
-│  │               Camera (V4L2, MMAP, /dev/video0)                 │  │
-│  │   YUYV 4:2:2 · 640×480 · 30 FPS · 4 mmap buffers               │  │
-│  └─────────────────────────────────────────────────────────────────┘  │
-└────────────────────────────────────────────────────────────────────────┘
-```
-
-**Data flow**
-
-1. `camera_capture()` waits on the V4L2 file descriptor with `select()`, dequeues
-   a filled buffer (`VIDIOC_DQBUF`), and returns a `Frame` whose `data` pointer
-   refers directly into a driver MMAP buffer.
-2. `CameraWorker` copies that frame into the `FrameQueue` (so the queue owns its
-   own buffer), then immediately returns the MMAP buffer to the driver
-   (`VIDIOC_QBUF`).
-3. The server's event loop polls Mongoose every 10 ms, then drains every pending
-   frame from the queue and hands it to `FrameStream`.
-4. `FrameStream` prepends a 28-byte `FramePacketHeader` and sends the whole
-   packet as **one** WebSocket binary message.
-5. The browser parses the header, validates the magic, converts the YUYV payload
-   to RGB, and paints the canvas.
+- Native camera capture with V4L2. No OpenCV, no ffmpeg, no GStreamer.
+- YUYV 4:2:2 video at 640x480, 30 FPS. The driver is allowed to adjust these.
+- Memory mapped (MMAP) capture, so frames come straight from driver buffers.
+- A dedicated capture thread, so the network loop never blocks on the camera.
+- A small bounded frame queue that drops old frames if the client is slow. This
+  gives clean back pressure instead of growing memory forever.
+- A single self contained web page. No external files, no CDN, no build tools for
+  the front end.
+- A simple binary frame protocol with a 28 byte header and a magic number.
+- Strict build flags: `-Wall -Wextra -Wpedantic` on C11.
+- No third party download step. Mongoose is vendored inside the repo.
 
 ---
 
-## Repository Layout
+## Quick start (the short version)
 
-```text
-legendary-chainsaw/
-├── Makefile                       # Build system (gcc, C11)
-├── .gitignore                     # Excludes build/, *.yuyv, old binaries
-├── README.md                      # This file
-│
-├── include/                       # Public module interfaces
-│   ├── camera_v4l2.h             #   Camera (V4L2) API
-│   ├── camera_worker.h           #   Capture worker-thread API
-│   ├── frame.h                   #   Frame struct + luminance helper
-│   ├── frame_queue.h             #   Bounded frame queue API
-│   ├── frame_stream.h            #   WebSocket frame-packet API
-│   ├── http_server.h             #   HTTP/WebSocket server API
-│   └── transport_tcp.h           #   Raw TCP client API (legacy path)
-│
-├── src/                           # Implementation
-│   ├── http_main.c               #   Entry point for the HTTP/WS server
-│   ├── http_server.c             #   Mongoose integration + embedded web UI
-│   ├── http_server_http_only.c   #   (Checkpoint) HTTP-only server, not built
-│   ├── http_server_ws_checkpoint.c#  (Checkpoint) HTTP+WS+WebRTC signaling
-│   ├── camera_v4l2.c             #   V4L2 capture (open/start/capture/release)
-│   ├── camera_worker.c           #   Capture thread implementation
-│   ├── frame.c                   #   frame_average_luminance()
-│   ├── frame_queue.c             #   Circular buffer queue
-│   ├── frame_stream.c            #   Frame packet framing + WebSocket send
-│   ├── main.c                    #   (Legacy) TCP sender entry point
-│   └── transport_tcp.c           #   (Legacy) TCP client implementation
-│
-├── third_party/
-│   └── mongoose/                 # Mongoose 7.23 (vendored)
-│       ├── mongoose.c
-│       └── mongoose.h
-│
-├── docs/
-│   └── 04_http_websocket_test.md #   Stage 4 notes (network topology)
-│
-└── camera_capture.c              # (Prototype) capture-to-file, not built
-    camera_sender.c               # (Prototype) raw-TCP sender, not built
-```
-
-> `http_server_http_only.c`, `http_server_ws_checkpoint.c`, `main.c`,
-> `camera_capture.c`, and `camera_sender.c` are **not** part of the current
-> `Makefile` build. They are earlier development stages kept for reference.
-
----
-
-## Requirements
-
-- **Linux** with the V4L2 kernel API (any modern desktop/server distro).
-- A **UVC webcam** exposed at `/dev/video0` supporting `V4L2_CAP_VIDEO_CAPTURE`
-  and `V4L2_CAP_STREAMING`, and accepting **YUYV** output.
-- **GCC** (or a compatible C11 compiler) and **GNU Make**.
-- **pthread** (linked automatically via `-pthread`).
-- A modern web browser (for viewing the stream).
-
-No external libraries are required — Mongoose is vendored in-repo.
-
----
-
-## Building
-
-From the repository root:
+If you just want it running and you are on Debian or Ubuntu:
 
 ```sh
-make            # builds build/http_server (the only default target)
+sudo apt update && sudo apt install -y build-essential git v4l-utils
+git clone https://github.com/ccsalman545/legendary-chainsaw.git
+cd legendary-chainsaw
 ```
 
-That compiles the HTTP/WebSocket server from these sources:
+Then open `src/http_main.c` and change the bind address from `192.168.1.10` to
+`0.0.0.0` (this one step is explained in detail later and is required on almost
+every machine), then:
+
+```sh
+make
+./build/http_server
+```
+
+Open `http://localhost:8080/` in your browser and click `Connect WebSocket`.
+
+The rest of this document explains every step in full.
+
+---
+
+## How it works (flowchart)
+
+```mermaid
+flowchart TD
+    A[USB webcam at /dev/video0] --> B[Camera V4L2 layer]
+    B -->|VIDIOC_DQBUF| C[Capture worker thread]
+    C -->|copy frame| D[Frame queue capacity 3]
+    D -->|drain each poll| E[HTTP server Mongoose event loop]
+    E -->|add 28 byte header| F[Frame stream]
+    F -->|WebSocket binary message| G[Browser]
+    G -->|YUYV to RGB in JavaScript| H[HTML canvas video]
+
+    E -->|GET slash| I[HTML page]
+    E -->|GET slash status| J[JSON status]
+
+    C -.->|VIDIOC_QBUF give buffer back| B
+```
+
+Plain words version of the flow:
+
+1. The camera layer opens `/dev/video0`, asks for YUYV 640x480 at 30 FPS, and
+   maps 4 memory buffers into the program.
+2. A worker thread keeps pulling filled frames from the driver, copies each one
+   into a small queue, and gives the driver buffer back right away.
+3. The server loop runs the network events, then empties the queue and pushes
+   each frame to the connected browser.
+4. Each frame goes out as one WebSocket binary message: a 28 byte header first,
+   then the raw YUYV pixels.
+5. The browser reads the header, converts YUYV to RGB, and paints the canvas.
+
+---
+
+## System diagram (TikZ)
+
+If you build documentation with LaTeX, this TikZ block draws the same pipeline.
+Compile it inside a document that loads `\usepackage{tikz}` and
+`\usetikzlibrary{arrows.meta, positioning}`.
+
+```latex
+\begin{tikzpicture}[
+    node distance = 12mm and 16mm,
+    box/.style = {draw, rounded corners, align=center,
+                  minimum width=38mm, minimum height=11mm, fill=gray!8},
+    io/.style  = {draw, rounded corners, align=center,
+                  minimum width=38mm, minimum height=11mm, fill=blue!8},
+    lbl/.style = {font=\small},
+    every edge/.style = {draw, -{Stealth}, thick}
+]
+    \node[io]  (cam)   {USB webcam \\ /dev/video0};
+    \node[box] (v4l2)  [below=of cam]   {Camera V4L2 layer \\ MMAP buffers};
+    \node[box] (work)  [below=of v4l2]  {Capture worker \\ pthread};
+    \node[box] (queue) [below=of work]  {Frame queue \\ capacity 3};
+    \node[box] (srv)   [below=of queue] {HTTP server \\ Mongoose loop};
+    \node[box] (fs)    [below=of srv]   {Frame stream \\ 28 byte header};
+    \node[io]  (br)    [below=of fs]    {Browser \\ YUYV to RGB canvas};
+
+    \draw (cam)   edge (v4l2);
+    \draw (v4l2)  edge node[lbl, right] {VIDIOC\_DQBUF} (work);
+    \draw (work)  edge node[lbl, right] {copy frame} (queue);
+    \draw (queue) edge node[lbl, right] {drain} (srv);
+    \draw (srv)   edge (fs);
+    \draw (fs)    edge node[lbl, right] {WebSocket binary} (br);
+
+    \draw[-{Stealth}, thick, dashed]
+        (work.west) to[bend left=55]
+        node[lbl, left] {VIDIOC\_QBUF} (v4l2.west);
+\end{tikzpicture}
+```
+
+---
+
+## The data path, step by step
+
+This is the same flow as above, but with the exact function names, so you can
+follow it in the source.
+
+1. `camera_capture()` waits on the camera file descriptor with `select()` for up
+   to 2 seconds. When a frame is ready it calls `VIDIOC_DQBUF` to take a filled
+   buffer out of the driver queue. It fills a `Frame` struct whose `data` pointer
+   points straight into a driver MMAP buffer. No copy happens yet.
+2. `CameraWorker` (running on its own thread) takes that `Frame` and calls
+   `frame_queue_push()`, which does a `malloc` plus `memcpy` so the queue owns its
+   own copy of the pixels.
+3. Right after the copy, the worker calls `camera_release_frame()`, which returns
+   the buffer to the driver with `VIDIOC_QBUF` so the camera can fill it again.
+4. The server loop calls `mg_mgr_poll()` every 10 milliseconds to handle network
+   events, then calls `http_send_frames()`, which pops every waiting frame from
+   the queue.
+5. For each popped frame, `frame_stream_send()` builds a 28 byte header, joins it
+   with the pixel data into one buffer, and sends it with `mg_ws_send()` as a
+   WebSocket binary message. The caller then frees the popped frame data.
+6. In the browser, `ws.onmessage` receives the binary message, `processFrame()`
+   validates the header, `yuyvToRgb()` converts the pixels, and the canvas is
+   updated. A small on screen HUD shows frame count and FPS.
+
+---
+
+## Dependencies
+
+You need these on the machine that has the camera and runs the server:
+
+| Dependency | Why it is needed | Notes |
+|---|---|---|
+| Linux kernel with V4L2 | Talks to the camera | Present on every normal Linux distro |
+| A UVC webcam at `/dev/video0` | The video source | Must support capture, streaming, and YUYV |
+| GCC (or Clang) | Compiles the C11 code | Any recent version works |
+| GNU Make | Runs the build | Standard build tool |
+| pthread | Runs the capture thread | Part of the C library, linked with `-pthread` |
+| Git | To clone the repo | Optional if you download a zip instead |
+| A web browser | To view the video | On any machine that can reach the server |
+| v4l-utils | Camera diagnostics | Optional, only used for troubleshooting |
+
+Mongoose (the HTTP and WebSocket library) is already inside
+`third_party/mongoose`, so you do not install it. It is a single `.c` file and a
+single `.h` file, compiled together with the rest of the project.
+
+The viewing device (the phone, tablet, or PC that opens the web page) needs only
+a browser. It does not need any of the build tools above.
+
+---
+
+## Install the dependencies (step by step, any Linux)
+
+Pick the block that matches your distribution and run the commands in a terminal.
+After that, jump to [Get the code](#get-the-code).
+
+### Debian, Ubuntu, Linux Mint, Raspberry Pi OS, Pop OS
+
+```sh
+sudo apt update
+sudo apt install -y build-essential git v4l-utils
+```
+
+`build-essential` installs GCC, Make, and the standard C headers in one package.
+
+### Fedora, RHEL, CentOS Stream, Rocky Linux, AlmaLinux
+
+```sh
+sudo dnf install -y gcc make git v4l-utils
+```
+
+On very old CentOS 7 systems use `yum` instead of `dnf`.
+
+### Arch Linux, Manjaro, EndeavourOS
+
+```sh
+sudo pacman -Syu --needed base-devel git v4l-utils
+```
+
+`base-devel` is a group that includes GCC and Make.
+
+### openSUSE (Leap and Tumbleweed)
+
+```sh
+sudo zypper install -y gcc make git v4l-utils
+```
+
+### Alpine Linux
+
+```sh
+sudo apk add build-base git v4l-utils
+```
+
+`build-base` provides GCC, Make, and the C headers on Alpine.
+
+### Void Linux
+
+```sh
+sudo xbps-install -Sy gcc make git v4l-utils
+```
+
+### Gentoo
+
+```sh
+sudo emerge --ask sys-devel/gcc sys-devel/make dev-vcs/git media-tv/v4l-utils
+```
+
+### Check that the tools are ready
+
+Run these two commands. Both should print a version number.
+
+```sh
+gcc --version
+make --version
+```
+
+If both print a version, your build tools are ready.
+
+---
+
+## Get the code
+
+Clone with Git:
+
+```sh
+git clone https://github.com/ccsalman545/legendary-chainsaw.git
+cd legendary-chainsaw
+```
+
+Or, if you do not use Git, download the repository zip from the project page,
+unzip it, and `cd` into the folder.
+
+---
+
+## Setup and build
+
+From the repository root, build the server:
+
+```sh
+make
+```
+
+This creates the program at `build/http_server`.
+
+Clean the build later if you want a fresh start:
+
+```sh
+make clean
+```
+
+Useful targets:
+
+| Command | What it does |
+|---|---|
+| `make` | Build `build/http_server` (this is the default) |
+| `make http` | The same as `make` |
+| `make clean` | Delete the `build/` folder |
+
+Sources that are compiled into the server:
 
 ```text
 src/http_main.c
@@ -205,80 +354,185 @@ src/camera_worker.c
 third_party/mongoose/mongoose.c
 ```
 
-Useful targets:
-
-| Target  | Effect                                             |
-|---------|----------------------------------------------------|
-| `make`  | Build `build/http_server` (alias of `make http`).  |
-| `make http` | Build the HTTP/WebSocket server.               |
-| `make clean` | Remove the `build/` directory.                |
-
-Compilation flags applied (see `Makefile`):
+Compiler flags used by the build:
 
 ```text
 -std=c11 -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Wpedantic -O2
 ```
 
+These flags mean the code is compiled as strict C11, with POSIX features turned
+on, with all common warnings enabled, and with optimization level 2. A clean
+build should finish with no errors.
+
+If you prefer Clang, you can build with it too:
+
+```sh
+make CC=clang
+```
+
 ---
 
-## Running
+## Run it
+
+Make sure your camera is plugged in, then start the server:
 
 ```sh
 ./build/http_server
 ```
 
-On startup the server:
+On start it will:
 
-1. Opens and configures `/dev/video0` (YUYV, 640×480, 30 FPS, 4 MMAP buffers).
-2. Starts the capture worker thread.
-3. Listens for HTTP on `http://192.168.1.10:8080`.
+1. Open and configure `/dev/video0` (YUYV, 640x480, 30 FPS, 4 MMAP buffers).
+2. Start the capture worker thread.
+3. Start listening for HTTP connections.
 
-Expected console output (abridged):
+To stop the server, press `Ctrl+C` in the terminal.
 
-```text
-Camera: <device name>
-Resolution : 640x480
-Pixel format: YUYV
-Frame size : 614400 bytes
-Frame rate : 30 FPS
-Buffer 0 mapped: 614400 bytes
-...
-HTTP server started successfully
-HTTP endpoint: http://192.168.1.10:8080/
-WebSocket endpoint: ws://192.168.1.10:8080/ws
-```
-
-Then open **http://192.168.1.10:8080/** in a browser on the receiver machine and
-click **“Connect WebSocket”**. Live video should appear on the canvas with a
-running frame count and FPS meter.
-
-Stop the server with **Ctrl+C**.
-
-> **Hardcoded configuration** (edit `src/http_main.c` / `src/http_server.c`):
->
-> | Setting            | Value             | Where                        |
-> |--------------------|-------------------|------------------------------|
-> | Listen address     | `192.168.1.10`    | `src/http_main.c`            |
-> | Port               | `8080`            | `src/http_main.c`            |
-> | Camera device      | `/dev/video0`     | `src/http_server.c`          |
-> | Width × Height     | `640 × 480`       | `src/http_server.c`          |
-> | Frame rate         | `30` FPS          | `src/http_server.c`          |
-> | Frame queue size   | `3`               | `src/http_server.c`          |
+Before this works on a new machine, read the next two sections. Almost every
+machine needs the bind address change, and many need the camera permission fix.
 
 ---
 
-## HTTP & WebSocket API
+## Important: set the correct bind address
 
-### `GET /`
+By default the server tries to listen on the fixed address `192.168.1.10`
+(set in `src/http_main.c`). It will only start if your machine actually owns that
+exact IP. On most Linux systems that address does not exist, so the server prints
+`Failed to start HTTP server` and stops.
 
-Returns the embedded HTML page (UTF-8). It contains a canvas, a
-**Connect/Disconnect WebSocket** button, and live status labels
-(WebSocket state, frame count, FPS). All YUYV→RGB conversion happens
-client-side in JavaScript.
+To make it run on any Linux machine, open `src/http_main.c`, change the address,
+save, and rebuild.
 
-### `GET /status`
+Listen on all network interfaces (the simplest choice, works everywhere):
 
-Returns a static JSON summary:
+```c
+HttpServer *server =
+    http_server_start(
+        "0.0.0.0",
+        8080
+    );
+```
+
+Or bind to your own machine IP. Find your IP first:
+
+```sh
+ip addr
+```
+
+Look for an address like `192.168.x.x` under your network interface, and put that
+value in place of `192.168.1.10`.
+
+After editing, rebuild and run:
+
+```sh
+make clean
+make
+./build/http_server
+```
+
+The port `8080` is set in the same file. Change it there if the port is already
+in use.
+
+Note: this is a one line setup step, not a bug in the code. The project builds
+fine on every Linux system. It just needs the address that matches your machine
+before it can start listening.
+
+---
+
+## Camera permissions
+
+On many systems only the `video` group can read the camera device. If you see a
+permission error when opening `/dev/video0`, add your user to the `video` group
+once, then log out and log back in (or reboot):
+
+```sh
+sudo usermod -aG video "$USER"
+```
+
+You can confirm your groups with:
+
+```sh
+groups
+```
+
+`video` should appear in the list after you log back in.
+
+---
+
+## Firewall and ports
+
+If you view the page from another machine and it will not connect, the firewall
+on the server may be blocking the port. Open TCP port 8080 (or the port you set):
+
+```sh
+# Debian and Ubuntu, if ufw is active
+sudo ufw allow 8080/tcp
+
+# Fedora and RHEL family, if firewalld is active
+sudo firewall-cmd --add-port=8080/tcp --permanent
+sudo firewall-cmd --reload
+```
+
+You can check if anything is already listening on the port with:
+
+```sh
+ss -ltnp | grep 8080
+```
+
+---
+
+## Open it in the browser
+
+- If you used `0.0.0.0` and you are on the same machine, open:
+  `http://localhost:8080/`
+- From another machine on the same network, use the server machine IP:
+  `http://SERVER_IP:8080/`
+- If you bound to a specific IP, use that exact IP in the address bar.
+
+On the page, click the `Connect WebSocket` button to start the live video. The
+button turns into a `Disconnect WebSocket` button while streaming. The status box
+shows the WebSocket state, the total frame count, the current sequence number,
+and the measured FPS.
+
+---
+
+## What the console prints
+
+A healthy start looks roughly like this (values depend on your camera):
+
+```text
+Camera: <your camera name>
+Resolution : 640x480
+Pixel format: YUYV
+Bytes/line : 1280
+Frame size : 614400 bytes
+Frame rate : 30 FPS
+Buffer 0 mapped: 614400 bytes
+Buffer 1 mapped: 614400 bytes
+Buffer 2 mapped: 614400 bytes
+Buffer 3 mapped: 614400 bytes
+Camera capture worker started
+Starting HTTP server on http://0.0.0.0:8080
+HTTP server started successfully
+HTTP endpoint: http://0.0.0.0:8080/
+WebSocket endpoint: ws://0.0.0.0:8080/ws
+```
+
+When a browser connects you will also see log lines like
+`WebSocket client connected` and `Frame stream client attached`. When it
+disconnects you will see `Client connection closed`.
+
+---
+
+## HTTP and WebSocket endpoints
+
+| Path | Method | What it returns |
+|---|---|---|
+| `/` | GET | The web page with the canvas and the connect button |
+| `/status` | GET | A small JSON status object |
+| `/ws` | GET (upgrade) | Upgrades the connection to a WebSocket |
+
+`/status` returns:
 
 ```json
 {
@@ -291,237 +545,347 @@ Returns a static JSON summary:
 }
 ```
 
-### `GET /ws` (WebSocket upgrade)
+WebSocket behavior at `/ws`:
 
-Upgrades the connection to a WebSocket.
+- On open, the server sends one text message: `Camera WebSocket connected`.
+- Text messages from the client are echoed back as text.
+- Video frames arrive as binary messages, one message per frame.
+- Only one streaming client is served at a time. A new client replaces the old
+  one.
 
-- **On open** — the server sends one text message:
-  `Camera WebSocket connected`.
-- **Text messages from the client** — are echoed back as text.
-- **Binary messages from the server** — each is one camera frame packet
-  (see [Frame Wire Protocol](#frame-wire-protocol)).
-- The server supports **one** attached streaming client at a time; a second
-  `MG_EV_WS_OPEN` replaces the first.
-
-Anything else returns `404 Not Found`.
+Any other path returns `404 Not Found`.
 
 ---
 
-## Frame Wire Protocol
+## Frame wire format
 
-Each frame is sent as a single **WebSocket binary message** composed of a
-28-byte header followed by the raw YUYV payload:
+Each frame is sent as one WebSocket binary message: a 28 byte header, then the
+raw YUYV pixels.
 
 ```text
 +------------------------------+---------------------------+
-| FramePacketHeader  (28 bytes)| YUYV frame data           |
+| header (28 bytes)            | YUYV pixel data           |
 +------------------------------+---------------------------+
-                                └── frame->size bytes
+                                 frame_size bytes
 ```
 
-### `FramePacketHeader` layout (7 × `uint32_t`, little-endian on x86)
+Header fields (seven values, each 4 bytes):
 
-| Offset | Field         | Description                                      |
-|--------|---------------|--------------------------------------------------|
-| 0      | `magic`       | Always `0x4652414D` (ASCII `FRAM`)               |
-| 4      | `width`       | Frame width in pixels                            |
-| 8      | `height`      | Frame height in pixels                           |
-| 12     | `pixel_format`| V4L2 pixel format (`V4L2_PIX_FMT_YUYV`)          |
-| 16     | `stride`      | Bytes per line (driver-negotiated)               |
-| 20     | `frame_size`  | Payload length in bytes                          |
-| 24     | `sequence`    | V4L2 buffer sequence number                      |
+| Offset | Field | Meaning |
+|---|---|---|
+| 0 | magic | Always `0x4652414D` (ASCII `FRAM`) |
+| 4 | width | Frame width in pixels |
+| 8 | height | Frame height in pixels |
+| 12 | pixel_format | V4L2 pixel format code (YUYV) |
+| 16 | stride | Bytes per line |
+| 20 | frame_size | Size of the pixel data in bytes |
+| 24 | sequence | Frame counter from the driver |
 
-The browser validates `magic == 0x4652414D`, checks
-`28 + frame_size <= byteLength`, and requires
-`frame_size >= width * height * 2` before decoding.
+The browser checks the magic value first. Then it checks that
+`28 + frame_size` is not larger than the message, and that `frame_size` is at
+least `width * height * 2` (the expected size of a full YUYV frame). Only then
+does it decode and draw.
 
-### YUYV 4:2:2 payload
+---
 
-Two pixels per 4 bytes — `Y0 U0 Y1 V0`:
+## YUYV to RGB conversion
+
+YUYV 4:2:2 packs two pixels into four bytes. The layout is:
 
 ```text
 Y0 U0 Y1 V0 Y2 U1 Y3 V1 ...
 ```
 
-The JavaScript decoder applies standard BT.601 coefficients:
+Each pair of pixels shares one U and one V value, and each pixel has its own Y
+(brightness) value. The browser rebuilds color using the standard BT.601 math:
 
 ```text
-R = (298·(Y-16) + 409·(V-128) + 128) >> 8
-G = (298·(Y-16) - 100·(U-128) - 208·(V-128) + 128) >> 8
-B = (298·(Y-16) + 516·(U-128) + 128) >> 8
+R = (298 * (Y - 16) + 409 * (V - 128) + 128) >> 8
+G = (298 * (Y - 16) - 100 * (U - 128) - 208 * (V - 128) + 128) >> 8
+B = (298 * (Y - 16) + 516 * (U - 128) + 128) >> 8
 ```
+
+Each result is clamped to the range 0 to 255. All of this happens in JavaScript
+on the viewing device, so the server only ever sends the raw YUYV bytes.
+
+The server also has a small helper, `frame_average_luminance()`, that averages
+every Y sample in a frame. It is used by the old TCP sender for logging and is
+not part of the WebSocket path.
 
 ---
 
-## Component Reference
+## Configuration values
 
-### `Camera` (`camera_v4l2.c`)
+These values are compile time constants. To change them, edit the file, then
+rebuild with `make`.
 
-Owns the V4L2 device. Responsibilities:
+| Setting | Value | File |
+|---|---|---|
+| Camera device | `/dev/video0` | `src/http_server.c` (`CAMERA_DEVICE`) |
+| Width | `640` | `src/http_server.c` (`CAMERA_WIDTH`) |
+| Height | `480` | `src/http_server.c` (`CAMERA_HEIGHT`) |
+| FPS | `30` | `src/http_server.c` (`CAMERA_FPS`) |
+| Frame queue size | `3` | `src/http_server.c` (`FRAME_QUEUE_CAPACITY`) |
+| Bind address | `192.168.1.10` | `src/http_main.c` |
+| Port | `8080` | `src/http_main.c` |
+| Number of MMAP buffers | `4` | `src/camera_v4l2.c` (`CAMERA_BUFFER_COUNT`) |
 
-- `camera_open()` — opens `/dev/video0` (non-blocking), verifies capture +
-  streaming capability, negotiates YUYV/640×480/30 FPS, requests **4 MMAP
-  buffers**, and maps them into user space.
-- `camera_start()` — queues all buffers and issues `VIDIOC_STREAMON`.
-- `camera_capture()` — waits up to 2 s on the fd with `select()`, dequeues a
-  filled buffer (`VIDIOC_DQBUF`), and populates a `Frame`.
+---
 
-  **Return codes:** `1` = frame ready · `0` = no frame / interrupted ·
-  `-1` = error (or timeout).
+## Project layout
 
-- `camera_release_frame()` — returns the frame's buffer to the driver
-  (`VIDIOC_QBUF`).
-- `camera_close()` — `STREAMOFF`, unmaps buffers, closes the fd, frees state.
+```text
+legendary-chainsaw/
+  Makefile               Build rules (gcc, C11)
+  README.md              This file
+  .gitignore             Ignores build output and old binaries
+  include/               Public headers, one per module
+    camera_v4l2.h          Camera (V4L2) API
+    camera_worker.h        Capture thread API
+    frame.h                Frame struct and luminance helper
+    frame_queue.h          Bounded frame queue API
+    frame_stream.h         WebSocket frame packet API
+    http_server.h          HTTP and WebSocket server API
+    transport_tcp.h        Old TCP client API
+  src/
+    http_main.c            Program entry point (set the bind IP here)
+    http_server.c          Mongoose server plus the embedded web page
+    camera_v4l2.c          V4L2 camera capture
+    camera_worker.c        Capture thread
+    frame_queue.c          Small circular frame queue
+    frame_stream.c         Builds the packet and sends it over WebSocket
+    frame.c                Frame helper
+    main.c                 Old TCP sender entry point (not built)
+    transport_tcp.c        Old TCP client (not built)
+    http_server_http_only.c        Older HTTP only checkpoint (not built)
+    http_server_ws_checkpoint.c    Older HTTP plus WS checkpoint (not built)
+  third_party/mongoose/    Mongoose library (included, not downloaded)
+    mongoose.c
+    mongoose.h
+  docs/
+    04_http_websocket_test.md   Stage notes about the network setup
+  camera_capture.c         Old prototype: capture to a file (not built)
+  camera_sender.c          Old prototype: raw TCP sender (not built)
+```
 
-> Frames returned by `camera_capture()` point directly into a driver MMAP
-> buffer and remain valid only until `camera_release_frame()` is called.
+Files kept only for reference and not part of `make`:
+`main.c`, `transport_tcp.c`, `http_server_http_only.c`,
+`http_server_ws_checkpoint.c`, `camera_capture.c`, and `camera_sender.c`.
 
-### `Frame` (`frame.h`)
+---
 
-Plain struct carrying width, height, pixel format, stride, byte size, V4L2
-sequence number, a `gettimeofday()`-based microsecond timestamp, the source
-buffer index, and a `uint8_t *data` pointer.
+## Component reference
 
-`frame_average_luminance()` averages every second byte of a YUYV buffer (the Y
-samples) — used by the legacy TCP sender for logging.
+### Camera (`camera_v4l2.c`)
 
-### `FrameQueue` (`frame_queue.c`)
+Owns the V4L2 device. Its jobs:
 
-A fixed-capacity **circular buffer** (`capacity = 3`). Every pushed frame is
-deep-copied (`malloc` + `memcpy`), so the queue owns its image data independent
-of the driver's MMAP buffer. `pop()` **transfers ownership** of `frame->data` to
-the caller, who must `free()` it. A full queue rejects the push and the worker
-drops the frame.
+- `camera_open()` opens `/dev/video0` in non blocking mode, checks that the
+  device supports capture and streaming, negotiates YUYV 640x480 at 30 FPS, asks
+  the driver for 4 MMAP buffers, and maps them into the program.
+- `camera_start()` queues all buffers and issues `VIDIOC_STREAMON`.
+- `camera_capture()` waits up to 2 seconds on the file descriptor, dequeues a
+  filled buffer with `VIDIOC_DQBUF`, and fills a `Frame`. Its return values are:
+  `1` means a frame is ready, `0` means no frame or interrupted, `-1` means error
+  or timeout.
+- `camera_release_frame()` returns the buffer to the driver with `VIDIOC_QBUF`.
+- `camera_close()` issues `VIDIOC_STREAMOFF`, unmaps the buffers, closes the file
+  descriptor, and frees state.
 
-> The queue has **no locking**. It is intended for the single-producer
-> (capture thread) / single-consumer (server loop) pattern used here. Do not
-> share it between multiple producers or consumers without adding a mutex.
+A frame returned by `camera_capture()` points directly into a driver buffer and
+is only valid until `camera_release_frame()` is called.
 
-### `CameraWorker` (`camera_worker.c`)
+### Frame (`frame.h`, `frame.c`)
 
-A pthread wrapper around the capture loop:
+A plain struct with width, height, pixel format, stride, byte size, the driver
+sequence number, a microsecond timestamp, the source buffer index, and the pixel
+data pointer. `frame_average_luminance()` averages the Y samples of a YUYV frame.
 
-1. `camera_capture()` → on success, `frame_queue_push()` a copy.
-2. `camera_release_frame()` the original MMAP buffer.
-3. On error/empty, sleep 10 ms to avoid a tight loop.
+### FrameQueue (`frame_queue.c`)
 
-Lifecycle: `create → start → stop → join → destroy`.
+A fixed size circular buffer, capacity 3. Every pushed frame is deep copied, so
+the queue owns its pixels independently of the driver buffers. `pop()` transfers
+ownership of the pixel buffer to the caller, who must free it. When the queue is
+full, the push is rejected and the worker drops that frame. The queue has no
+internal lock, because it is used in a single producer, single consumer pattern.
 
-### `FrameStream` (`frame_stream.c`)
+### CameraWorker (`camera_worker.c`)
 
-Tracks the currently attached WebSocket connection (a non-owning Mongoose
-pointer). `frame_stream_send()` builds the 28-byte header + YUYV payload and
-sends it with `mg_ws_send(..., WEBSOCKET_OP_BINARY)`.
+A pthread wrapper around the capture loop. It captures a frame, copies it into the
+queue, then releases the driver buffer. On error or empty it sleeps 10
+milliseconds to avoid a busy loop. Its lifecycle is create, start, stop, join,
+destroy.
 
-### `HttpServer` (`http_server.c`)
+### FrameStream (`frame_stream.c`)
+
+Tracks the one attached WebSocket connection (a pointer owned by Mongoose, not by
+us). `frame_stream_send()` builds the 28 byte header plus the YUYV payload and
+sends it as one binary WebSocket message.
+
+### HttpServer (`http_server.c`)
 
 The orchestrator. It owns the Mongoose manager, the camera, the worker, the
-queue, and the frame stream. Its `run()` loop:
+queue, and the frame stream. Its run loop polls Mongoose for network events every
+10 milliseconds, then drains the queue and sends the frames. It also embeds the
+entire web page as a single C string.
 
-```c
-while (server->running) {
-    mg_mgr_poll(&server->mgr, 10);   // network events, 10 ms
-    http_send_frames(server);        // drain queue → WebSocket
-}
+### transport_tcp (`transport_tcp.c`)
+
+An old, simple blocking TCP client used by the earlier prototypes. It is not part
+of the current server build.
+
+---
+
+## Threading and memory ownership
+
+There are two threads in the running server:
+
+1. The capture thread (CameraWorker). It is the only producer for the queue.
+2. The main thread (HttpServer run loop). It is the only consumer of the queue,
+   and it is the only thread that talks to Mongoose.
+
+Memory ownership moves along the pipeline in clear steps:
+
+- The driver owns the MMAP buffers. `camera_capture()` borrows one, and
+  `camera_release_frame()` gives it back.
+- `frame_queue_push()` makes a private copy, so the queue owns that copy.
+- `frame_queue_pop()` hands the copy to the caller, who must free it after the
+  frame is sent.
+
+Because the queue is single producer and single consumer, it needs no lock. If
+you ever add more producers or consumers, you must add a mutex.
+
+---
+
+## Cross platform notes (Linux)
+
+This project was checked for building and running across Linux systems. Summary:
+
+- The code builds cleanly on a modern GCC with strict warnings turned on. It uses
+  only standard POSIX and Linux V4L2 headers, so it compiles on the common
+  distros (Debian, Ubuntu, Fedora, Arch, openSUSE, Alpine, and similar).
+- The one thing that stops it from running out of the box on a new machine is the
+  fixed bind address `192.168.1.10` in `src/http_main.c`. Change it to `0.0.0.0`
+  or your own IP as shown above, and it starts on any Linux box. This is a one
+  line setup step, not a code bug.
+- The wire header is written in the host byte order and read by the browser as
+  little endian. This is correct on x86 and on the common ARM builds, which cover
+  almost every desktop, laptop, server, and Raspberry Pi. On a big endian Linux
+  system the header bytes would need to be swapped.
+- The camera path assumes a V4L2 device that supports YUYV. Most USB webcams do.
+  If yours does not, see the troubleshooting table.
+
+In short: the build works everywhere, and running works everywhere once you set
+the bind address for your machine.
+
+---
+
+## Verify your build and run
+
+Use these quick checks to confirm each stage.
+
+1. Confirm the camera exists and lists a YUYV mode:
+
+```sh
+ls -l /dev/video*
+v4l2-ctl -d /dev/video0 --list-formats-ext
 ```
 
-It also embeds the entire web UI as a single C string (`HTML_PAGE`).
+2. Confirm a clean build:
 
-### `transport_tcp` (`transport_tcp.c`, legacy path)
+```sh
+make clean
+make
+ls -l build/http_server
+```
 
-A minimal blocking IPv4 TCP client: `tcp_connect()` + `tcp_send_all()` (loops on
-`send()` until the whole buffer is transmitted, handling `EINTR`).
+3. Confirm the server is listening (after you start it):
 
----
+```sh
+ss -ltnp | grep 8080
+```
 
-## Legacy TCP Prototypes
+4. Confirm the status endpoint answers:
 
-Before the WebSocket server, the project streamed raw YUYV frames over plain TCP.
-These files remain in the tree for reference and are **not** built by `make`.
+```sh
+curl http://localhost:8080/status
+```
 
-| File               | Purpose                                                                  |
-|--------------------|--------------------------------------------------------------------------|
-| `camera_capture.c` | Standalone capture: grabs 100 frames, saves the first to `frame_000.yuyv`. |
-| `camera_sender.c`  | Standalone capture + raw TCP sender to `192.168.1.20:5000`.              |
-| `src/main.c`       | Modular rework of the sender using `camera_v4l2` + `transport_tcp`; sends 100 frames to `192.168.1.20:5000`. |
-
-These send **bare YUYV bytes** with no header/framing, so they expect a matching
-receiver that already knows the resolution.
-
----
-
-## Network Setup
-
-From the project's stage notes (`docs/04_http_websocket_test.md`):
-
-| Device    | IP Address    | Role                        |
-|-----------|---------------|-----------------------------|
-| Fedora PC | `192.168.1.10`| Camera + HTTP/WebSocket server |
-| Ubuntu PC | `192.168.1.20`| Receiver / browser client    |
-
-Endpoints:
-
-- HTTP page: `http://192.168.1.10:8080/`
-- Status: `http://192.168.1.10:8080/status`
-- WebSocket: `ws://192.168.1.10:8080/ws`
-
-If the machines are on a different subnet, edit the address in `src/http_main.c`
-(or bind to `0.0.0.0` to listen on all interfaces) and adjust the browser URL
-accordingly. Ensure the firewall allows TCP/8080.
+You should get the JSON status object back.
 
 ---
 
 ## Troubleshooting
 
-| Symptom | Likely cause / fix |
+| Message or symptom | Likely cause and fix |
 |---|---|
-| `Cannot open camera /dev/video0: No such file or directory` | Wrong device node. Find it with `ls -l /dev/video*` or `v4l2-ctl --list-devices`, then update `CAMERA_DEVICE`. |
-| `Device does not support video capture` | The node is not a capture device (e.g. it's a metadata node). |
-| `Camera did not accept YUYV format` | The camera lacks YUYV. Try a different format or camera. Check with `v4l2-ctl --list-formats-ext`. |
-| `Camera capture timeout` | No frames arriving — device busy (used by another process) or unsupported resolution/framerate. |
-| `Failed to start HTTP server` | Address not available on this host. Use `0.0.0.0` or a local IP; check `ip addr`. |
-| Browser shows “WebSocket: Error” | Wrong host/IP or the port is blocked by a firewall. |
-| Video freezes / low FPS | The frame queue (capacity 3) drops frames when the client is slow — expected back-pressure behavior. |
-| `Frame queue full; dropping frame` spam | The consumer isn't draining (no client connected, or slow network). Frames are dropped intentionally. |
+| `Cannot open camera /dev/video0` | No camera, or a different device node. List devices with `ls -l /dev/video*` or `v4l2-ctl --list-devices`. |
+| Permission denied on the camera | Add your user to the `video` group with `sudo usermod -aG video "$USER"`, then log out and in. |
+| `Device does not support video capture` | The node is not a capture device. Try another `/dev/videoN`. |
+| `Camera did not accept YUYV format` | The camera has no YUYV mode. Check with `v4l2-ctl -d /dev/video0 --list-formats-ext`. |
+| `Camera capture timeout` | The camera is busy in another program, or the resolution or FPS is not supported. |
+| `Failed to start HTTP server` | The bind address is not on this machine. Set `0.0.0.0` or your own IP in `src/http_main.c`, then rebuild. |
+| Browser shows `WebSocket: Error` | Wrong IP, or the port is blocked. Check the address and open the port in the firewall. |
+| Page loads but no video | You did not click `Connect WebSocket`, or another client is already attached. Only one client streams at a time. |
+| `Frame queue full; dropping frame` | Normal when no client is connected or the network is slow. Old frames are dropped on purpose. |
+| `Address already in use` | Another program uses port 8080. Change the port in `src/http_main.c` or stop the other program. |
 
-Quick camera diagnostics (if `v4l-utils` is installed):
+Quick camera checks (needs `v4l-utils`):
 
 ```sh
 v4l2-ctl --list-devices
 v4l2-ctl -d /dev/video0 --list-formats-ext
-v4l2-ctl -d /dev/video0 --set-fmt-video=width=640,height=480,pixelformat=YUYV
 ```
 
 ---
 
-## Limitations & Future Work
+## Frequently asked questions
 
-- **Single WebSocket client.** `FrameStream` stores one connection; a second
-  client silently replaces the first.
-- **No authentication / TLS.** The server is plain HTTP+WS, intended for a
-  trusted LAN.
-- **Unlocked frame queue.** Relies on the single-producer/single-consumer
-  design; a mutex/condition variable would make it safe for multiple consumers.
-- **Host-order wire header.** The 28-byte header is written with `memcpy` from a
-  host-endian struct and decoded as little-endian in the browser — correct on
-  x86/ARM little-endian, but would need explicit serialization for portability.
-- **Hardcoded configuration.** Device, resolution, FPS, and bind address are
-  compile-time constants; command-line flags or a config file would be a natural
-  next step.
-- **No audio, no compression.** Raw YUYV is bandwidth-hungry
-  (~640×480×2×30 ≈ 18.4 MB/s); MJPEG/H.264 would be more efficient.
-- **Checkpoint files** (`http_server_http_only.c`, `http_server_ws_checkpoint.c`)
-  could be removed or moved to a `docs/` archive.
+**Do I need OpenCV or ffmpeg?**
+No. The program talks to the camera directly with V4L2 and does its own framing.
+
+**Do I need to install Mongoose?**
+No. It is included in `third_party/mongoose` and is compiled with the project.
+
+**Can more than one browser watch at once?**
+Not in the current version. The server keeps one streaming client. A new client
+replaces the old one.
+
+**Why is the video data so large?**
+It is raw YUYV, which is about 640 x 480 x 2 x 30, or roughly 18 megabytes per
+second. There is no compression. This is fine on a LAN but not over the internet.
+
+**Can I change resolution or FPS?**
+Yes. Edit the constants in `src/http_server.c` and rebuild. The driver may adjust
+your request to the nearest supported mode.
+
+**Does it work on a Raspberry Pi?**
+Yes, as long as the Pi runs Linux with V4L2 and a supported camera. Set the bind
+address as described.
+
+---
+
+## Limitations and ideas for later
+
+- Single WebSocket client. A second client replaces the first.
+- No authentication and no TLS. It is meant for a trusted local network.
+- The frame queue has no lock, because it relies on one producer and one
+  consumer.
+- The header is written in host byte order. Add explicit little endian
+  serialization for big endian machines.
+- Device, resolution, FPS, bind address, and port are compile time constants.
+  Command line flags or a config file would be a natural next step.
+- No audio and no compression. MJPEG or H.264 would use far less bandwidth.
+- The old checkpoint and prototype files could be moved into an archive folder.
 
 ---
 
 ## License
 
-- The application code in this repository is provided for educational purposes
-  without an explicit license; add one before redistribution.
-- The vendored **Mongoose 7.23** library
-  (`third_party/mongoose/`) is © Cesanta Software Limited and is
-  **dual-licensed**: **GPL-2.0-only** or a **commercial license**
-  (https://www.mongoose.ws/licensing/). If you distribute binaries that link
-  Mongoose under terms other than GPLv2, you must obtain a commercial license
+- The application code in this repository is provided for learning. Add a formal
+  license before you share or ship it.
+- The included Mongoose library in `third_party/mongoose` is copyright Cesanta
+  Software Limited and is dual licensed: GPL-2.0-only, or a commercial license
+  from https://www.mongoose.ws/licensing/. If you ship binaries that link
+  Mongoose under any terms other than GPLv2, you must get a commercial license
   from Cesanta.
