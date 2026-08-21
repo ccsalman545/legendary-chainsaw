@@ -1,6 +1,3 @@
-#define _DEFAULT_SOURCE
-#define _POSIX_C_SOURCE 200809L
-
 #include "http_server.h"
 #include "mongoose.h"
 #include "camera_v4l2.h"
@@ -14,7 +11,11 @@
 #include <stdbool.h>
 #include <string.h>
 
-#define CAMERA_DEVICE "/dev/video0"
+/*
+ * Default camera device.
+ * Overridden at runtime by the CAMERA_DEVICE environment variable.
+ */
+#define CAMERA_DEVICE_DEFAULT "/dev/video0"
 #define CAMERA_WIDTH  640
 #define CAMERA_HEIGHT 480
 #define CAMERA_FPS    30
@@ -30,6 +31,8 @@ struct HttpServer {
 
     FrameQueue *queue;
     FrameStream *frame_stream;
+
+    char camera_device[256];
 
     bool running;
 };
@@ -451,12 +454,16 @@ static void http_event_handler(
                 "Content-Type: application/json\r\n",
                 "{"
                 "\"status\":\"online\","
-                "\"camera\":\"/dev/video0\","
+                "\"camera\":\"%s\","
                 "\"format\":\"YUYV\","
-                "\"width\":640,"
-                "\"height\":480,"
-                "\"fps\":30"
-                "}"
+                "\"width\":%u,"
+                "\"height\":%u,"
+                "\"fps\":%u"
+                "}",
+                server->camera_device,
+                (unsigned)CAMERA_WIDTH,
+                (unsigned)CAMERA_HEIGHT,
+                (unsigned)CAMERA_FPS
             );
 
             return;
@@ -642,11 +649,33 @@ HttpServer *http_server_start(
 
 
     /*
+     * Determine camera device.
+     * Use CAMERA_DEVICE environment variable if set,
+     * otherwise use the default.
+     */
+    const char *camera_device =
+        getenv("CAMERA_DEVICE");
+
+    if (camera_device == NULL) {
+        camera_device = CAMERA_DEVICE_DEFAULT;
+    }
+
+    /*
+     * Store in server struct for status endpoint.
+     */
+    snprintf(
+        server->camera_device,
+        sizeof(server->camera_device),
+        "%s",
+        camera_device
+    );
+
+    /*
      * Open camera.
      */
     server->camera =
         camera_open(
-            CAMERA_DEVICE,
+            camera_device,
             CAMERA_WIDTH,
             CAMERA_HEIGHT,
             CAMERA_FPS
@@ -657,7 +686,7 @@ HttpServer *http_server_start(
         fprintf(
             stderr,
             "Failed to open camera %s\n",
-            CAMERA_DEVICE
+            camera_device
         );
 
         frame_stream_destroy(
@@ -873,7 +902,7 @@ HttpServer *http_server_start(
 
     printf(
         "Camera: %s\n",
-        CAMERA_DEVICE
+        camera_device
     );
 
     printf(
